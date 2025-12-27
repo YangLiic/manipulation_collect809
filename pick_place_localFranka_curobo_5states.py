@@ -298,7 +298,7 @@ class CuroboPickPlaceController:
         # 暂时忽略所有物体，只保留桌子作为障碍物
         ignore_substring = [
             self.franka_prim_path, 
-            "/World/defaultGroundPlane", 
+            #"/World/defaultGroundPlane", 
             #"/curobo",
             "/World/Vegetable_7",  # 忽略要抓取的物体
             "/World/Bowl_0",       # 忽略碗

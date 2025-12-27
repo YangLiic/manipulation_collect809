@@ -1,0 +1,29 @@
+{
+    "version": "1.0",
+    "file_records": [
+        {
+            "source_url": "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Materials/Base/Metals/Aluminum_Anodized_Black.mdl",
+            "source_hash": "a7781073b3a0aa2db3061650947bf319887d6d48",
+            "target_url": "./omniverse-content-production.s3-us-west-2.amazonaws.com/Materials/Base/Metals/Aluminum_Anodized_Black.mdl",
+            "target_hash": "87cf97babd1366208d77ebb529524aa1dad30bd3"
+        },
+        {
+            "source_url": "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Materials/Base/Metals/Aluminum_Anodized/Aluminum_Anodized_BaseColor.png",
+            "source_hash": "cb875467e52e1a40dd49f6bdfe561a7db2834f20",
+            "target_url": "./omniverse-content-production.s3-us-west-2.amazonaws.com/Materials/Base/Metals/Aluminum_Anodized/Aluminum_Anodized_BaseColor.png",
+            "target_hash": "680f7d64a5a7cb91d43c276c7fef85e63c45fc79"
+        },
+        {
+            "source_url": "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Materials/Base/Metals/Aluminum_Anodized/Aluminum_Anodized_ORM.png",
+            "source_hash": "7227cf737f8c44e982cce6115ca1acd3459310bd",
+            "target_url": "./omniverse-content-production.s3-us-west-2.amazonaws.com/Materials/Base/Metals/Aluminum_Anodized/Aluminum_Anodized_ORM.png",
+            "target_hash": "bc2728f9f3c672ab3eb71192850b7b26ab43239c"
+        },
+        {
+            "source_url": "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Materials/Base/Metals/Aluminum_Anodized/Aluminum_Anodized_Normal.png",
+            "source_hash": "34adef22209c02c420ccfcadc52820823bab2f41",
+            "target_url": "./omniverse-content-production.s3-us-west-2.amazonaws.com/Materials/Base/Metals/Aluminum_Anodized/Aluminum_Anodized_Normal.png",
+            "target_hash": "1fb260145012cd84d8a14431256c2c14aab8af5f"
+        }
+    ]
+}
