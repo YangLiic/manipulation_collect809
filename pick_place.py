@@ -37,7 +37,7 @@ except Exception:
     print("使用示例路径中的 PickPlaceController")
 
 # 加载你的场景 USD
-open_stage("/home/yons/data/Collected_World1/World_yang.usd")
+open_stage("/home/di-gua/licheng/manipulation/CVPR_pickplace/Collected_World0/World0.usd")
 # 让场景完成一次更新，确保后续能正确查询 prim
 simulation_app.update()
 

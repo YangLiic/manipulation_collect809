@@ -22,7 +22,7 @@ _HEADLESS_FLAG = _HEADLESS in {"1", "true", "yes", "on"}
 
 simulation_app = SimulationApp({"headless": _HEADLESS_FLAG})
 
-# Third Party - Import torch AFTER SimulationApp initialization
+# Third Party
 import torch
 a = torch.zeros(4, device="cuda:0")  # 必须在导入 curobo 前初始化 torch
 
@@ -50,12 +50,6 @@ from curobo.util.usd_helper import UsdHelper
 from curobo.util_file import get_robot_configs_path, get_world_configs_path, join_path, load_yaml
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig
 
-# Import grasp pose generator (指定姿态版本)
-from grasp_pose_generator_specified import generate_grasp_pose, quaternion_to_euler
-
-# Import Seed 模型抓取姿态估计
-from estimate_grasp_pose_seed import estimate_grasp_pose
-
 # 优先使用 omni.isaac.franka 的 Franka 包装类
 try:
     from omni.isaac.franka import Franka
@@ -63,7 +57,7 @@ except Exception:
     Franka = None
 
 # 加载场景 USD
-open_stage("/home/di-gua/licheng/manipulation/Collected_World1/World0.usd")
+open_stage("/home/yons/data/Collected_World1/World0.usd")
 simulation_app.update()
 
 # 创建 World
@@ -76,7 +70,7 @@ bowl = XFormPrim("/World/Bowl_0")
 # 固定放置位置
 fixed_spawn_pos = np.array([0.0, 0.6, -0.25], dtype=float)
 
-FRANKA_LOCAL_USD = "Franka_usd/Franka.usd"
+FRANKA_LOCAL_USD = "/home/yons/data/Franka_usd/Franka.usd"
 FRANKA_REFERENCE_PATH = "/World/Franka"
 FRANKA_NESTED_PATH = "/World/Franka/franka"
 
@@ -238,6 +232,7 @@ class CuroboPickPlaceController:
         self.idx_list = None
         self.is_attached = False
         self.wait_counter = 0  # 等待计数器
+        self.stabilize_counter = 0 # 放置前稳定计数器
         self.wait_steps = 50   # 增加等待步数，确保夹爪完全闭合
         self.saved_pick_position = None  # 保存抓取时的位置，避免提升时跟踪移动物体
         self.plan_fail_counter = 0  # 规划失败计数器
@@ -248,10 +243,6 @@ class CuroboPickPlaceController:
         
         # 阈值
         self.position_threshold = 0.08  # 8cm（放宽阈值，因为轨迹执行完即可认为到达）
-        
-        # 🎯 随机抓取姿态生成器
-        self.use_random_grasp = True  # 启用随机抓取姿态
-        self.current_grasp_quat = None  # 当前生成的抓取姿态
         
         print("✅ CuRobo MotionGen 初始化完成")
     
@@ -307,8 +298,8 @@ class CuroboPickPlaceController:
         # 暂时忽略所有物体，只保留桌子作为障碍物
         ignore_substring = [
             self.franka_prim_path, 
-            "/World/defaultGroundPlane", 
-            "/curobo",
+            #"/World/defaultGroundPlane", 
+            #"/curobo",
             "/World/Vegetable_7",  # 忽略要抓取的物体
             "/World/Bowl_0",       # 忽略碗
             # 暂时忽略其他物体以简化规划
@@ -370,40 +361,27 @@ class CuroboPickPlaceController:
         return self._execute_trajectory()
     
     def _get_target_pose(self, picking_position, placing_position, offset):
-        """根据当前事件获取目标位姿（支持随机抓取姿态）"""
-        # 🎯 使用随机生成的抓取姿态（如果可用），否则使用默认朝下姿态
-        if self.current_grasp_quat is not None:
-            ee_quat = self.current_grasp_quat
-        else:
-            # 默认：末端朝下的四元数 [w, x, y, z] - 180度绕X轴旋转
-            ee_quat = np.array([0.0, 1.0, 0.0, 0.0])  # 朝下 (w, x, y, z)
+        """根据当前事件获取目标位姿（6状态版本）"""
+        # 末端朝下的四元数 [w, x, y, z] - 180度绕X轴旋转
+        ee_quat = np.array([0.0, 1.0, 0.0, 0.0])  # 朝下 (w, x, y, z)
         
-        if self.current_event == 0:  # 接近抓取
+        if self.current_event == 0:  # 靠近抓取物体 (Approach)
             pos = picking_position + np.array([0, 0, self.approach_height]) + offset
             return (pos, ee_quat)
-        elif self.current_event == 1:  # 下降抓取
+        elif self.current_event == 1:  # 下降抓取 (Descend)
             pos = picking_position + offset
             return (pos, ee_quat)
-        elif self.current_event == 2:  # 抓取（夹爪控制移到主循环）
-            return None  # 不规划，等待夹爪闭合
-        elif self.current_event == 3:  # 附着物体并提升
+        elif self.current_event == 2:  # 抓取 (Grasp - 等待夹爪闭合)
+            return None  
+        elif self.current_event == 3:  # 附着物体并运输 (Transport)
             if not self.is_attached:
                 self._attach_object()
-            # 使用保存的抓取位置，而不是物体当前位置（物体已随机器人移动）
-            if self.saved_pick_position is not None:
-                pos = self.saved_pick_position + np.array([0, 0, self.lift_height]) + offset
-            else:
-                pos = picking_position + np.array([0, 0, self.lift_height]) + offset
-            return (pos, ee_quat)
-        elif self.current_event == 4:  # 接近放置
-            pos = placing_position + np.array([0, 0, self.approach_height]) + offset
-            return (pos, ee_quat)
-        elif self.current_event == 5:  # 下降放置
+            # 直接规划到放置位置
             pos = placing_position + offset
             return (pos, ee_quat)
-        elif self.current_event == 6:  # 放置（夹爪控制移到主循环）
-            return None  # 不规划，等待夹爪打开
-        elif self.current_event == 7:  # 分离物体并后退
+        elif self.current_event == 4:  # 放置 (Place - 等待稳定 + 打开夹爪)
+            return None  
+        elif self.current_event == 5:  # 分离物体并后退 (Retreat)
             if self.is_attached:
                 self._detach_object()
             pos = placing_position + np.array([0, 0, self.approach_height]) + offset
@@ -477,9 +455,9 @@ class CuroboPickPlaceController:
             cmd_state = self.cmd_plan[self.cmd_idx]
             self.cmd_idx += 1
             
-            # 🔑 关键修复：在 Event 3-5 期间，在 ArticulationAction 中包含夹爪关节
+            # 🔑 关键修复：在 Event 3 (运输) 期间，在 ArticulationAction 中包含夹爪关节
             # 这样可以防止手臂运动时覆盖夹爪控制
-            if self.current_event in [3, 4, 5]:  # 抬起、移动、下降放置阶段
+            if self.current_event == 3:  # 运输阶段
                 # 包含手臂关节 (0-6) + 夹爪关节 (7-8)
                 positions = np.concatenate([
                     cmd_state.position.cpu().numpy(),  # 手臂关节位置
@@ -507,7 +485,7 @@ class CuroboPickPlaceController:
                     joint_indices=joint_indices,
                 )
             else:
-                # Event 0-2, 6-7: 只控制手臂关节
+                # Event 0, 1, 5: 只控制手臂关节
                 art_action = ArticulationAction(
                     cmd_state.position.cpu().numpy(),
                     cmd_state.velocity.cpu().numpy() * 0.0,
@@ -526,65 +504,39 @@ class CuroboPickPlaceController:
     
     def _attach_object(self):
         """附着物体"""
-        # 在附加之前，需要先更新世界模型，包含要抓取的物体
-        # 这样 CuRobo 才能找到物体并附加
-        print("🔄 更新世界模型以包含物体...")
-        ignore_substring = [
-            self.franka_prim_path, 
-            "/World/defaultGroundPlane", 
-            "/curobo",
-            # 不要忽略 Vegetable_7，因为我们要附加它
-            "/World/Bowl_0",
-            "/World/Bottle",
-            "/World/Scissors",
-            "/World/Vegetable_8",
-            "/World/Vegetable_9",
-            "/World/Garlic",
-            "/World/Peeler",
-            "/World/SaltShaker",
-            "/World/CuttingBoard",
-        ]
-        obstacles_with_object = self.usd_help.get_obstacles_from_stage(
-            only_paths=["/World"],
-            ignore_substring=ignore_substring,
-            reference_prim_path=self.franka_prim_path,
-        )
-        obstacles_with_object.add_obstacle(self._world_cfg_table.cuboid[0])
-        collision_world = obstacles_with_object.get_collision_check_world()
-        self.motion_gen.update_world(collision_world)
+        # 🔑 优化：直接指定要附加的物体路径，而不是通过排除法
+        target_object_path = "/World/Vegetable_7"
         
-        # 从障碍物配置中查找包含 "Vegetable_7" 的对象名称
-        object_name = None
+        print(f"🔄 直接获取目标物体: {target_object_path}")
+        
+        # 方法1: 尝试直接从 stage 获取单个物体
         try:
-            # 方法1: 从 WorldConfig 中查找 mesh 对象
-            if obstacles_with_object.mesh is not None:
-                for mesh_obj in obstacles_with_object.mesh:
-                    if "Vegetable_7" in mesh_obj.name or "Vegetable_7" in str(mesh_obj):
-                        object_name = mesh_obj.name
-                        print(f"✅ 从 WorldConfig 找到物体: {object_name}")
-                        break
+            # 使用 only_paths 直接指定物体路径
+            obstacles_with_object = self.usd_help.get_obstacles_from_stage(
+                only_paths=[target_object_path],
+                reference_prim_path=self.franka_prim_path,
+            )
             
-            # 方法2: 从世界模型中查找
-            if object_name is None:
-                obstacle_names = self.motion_gen.world_collision.get_obstacle_names(env_idx=0)
-                print(f"🔍 世界模型中的对象: {obstacle_names}")
-                
-                # 查找包含 "Vegetable_7" 的对象
-                for name in obstacle_names:
-                    if "Vegetable_7" in name:
-                        object_name = name
-                        print(f"✅ 从世界模型找到物体: {object_name}")
-                        break
+            # 检查是否成功获取到物体
+            object_name = None
+            if obstacles_with_object.mesh is not None and len(obstacles_with_object.mesh) > 0:
+                object_name = obstacles_with_object.mesh[0].name
+                print(f"✅ 直接获取到物体: {object_name}")
+            else:
+                # 备用：使用路径作为名称
+                object_name = target_object_path
+                print(f"⚠️ 未找到 mesh，使用路径: {object_name}")
             
-            # 方法3: 直接使用 prim 路径
-            if object_name is None:
-                object_name = "/World/Vegetable_7"
-                print(f"⚠️ 未找到对象，使用 prim 路径: {object_name}")
+            # 更新世界模型（包含目标物体）
+            collision_world = obstacles_with_object.get_collision_check_world()
+            self.motion_gen.update_world(collision_world)
+            
         except Exception as e:
-            print(f"⚠️ 查找对象名称失败: {e}，使用默认路径")
-            object_name = "/World/Vegetable_7"
+            print(f"⚠️ 直接获取物体失败: {e}，使用备用方法")
+            # 备用方法：使用路径
+            object_name = target_object_path
         
-        # 现在可以附加物体了
+        # 附加物体到机器人
         sim_js = self.robot.get_joints_state()
         cu_js = JointState(
             position=self.tensor_args.to_device(sim_js.positions),
@@ -593,6 +545,7 @@ class CuroboPickPlaceController:
             jerk=self.tensor_args.to_device(sim_js.velocities) * 0.0,
             joint_names=self.robot.dof_names,
         )
+        
         try:
             print(f"📦 尝试附加物体: {object_name}")
             self.motion_gen.attach_objects_to_robot(
@@ -638,7 +591,6 @@ class CuroboPickPlaceController:
         self._step_idx = 0
         self.wait_counter = 0
         self.plan_fail_counter = 0
-        self.current_grasp_quat = None  # 重置抓取姿态
         if self.is_attached:
             self._detach_object()
     
@@ -647,8 +599,8 @@ class CuroboPickPlaceController:
         return self.current_event
     
     def next_event(self):
-        """切换到下一个事件"""
-        if self.current_event < 8:
+        """切换到下一个事件（6状态版本）"""
+        if self.current_event < 6:
             self.current_event += 1
             print(f"✅ 切换到 Event {self.current_event}")
 
@@ -681,28 +633,6 @@ reset_needed = False
 placing_height_offset = 0.10 #放置时高度
 eef_lateral_offset = np.array([0.0, 0.0, 0.02])  # 夹取时偏移
 
-# ========== 🎯 抓取姿态参数（用户可修改）==========
-# 是否使用 Seed 模型自动估计抓取姿态
-USE_SEED_MODEL = True  # True: 使用 Seed 模型, False: 使用手动指定的参数
-
-# Seed 模型配置
-SEED_IMAGE_PATH = "./image/grasp_scene.jpeg"  # 图像路径（本地文件或 URL）
-SEED_OBJECT_NAME = "黄瓜"  # 要抓取的物体名称
-
-# 手动指定的抓取姿态参数（当 USE_SEED_MODEL=False 时使用）
-# Z 轴旋转角度（度）：正值为顺时针，范围 -90 到 +90
-GRASP_Z_ROTATION = 0.0
-
-# X 轴倾斜角度（度）：范围 -90 到 +90
-GRASP_TILT_X = 0.0
-
-# Y 轴倾斜角度（度）：范围 -90 到 +90
-GRASP_TILT_Y = 0.0
-# ================================================
-
-# 🔄 Seed 模型结果缓存（避免重复调用）
-_seed_grasp_params_cache = None  # 缓存格式: (z_rot, tilt_x, tilt_y)
-
 
 def step_once(render: bool = True) -> bool:
     """执行一次仿真和控制循环，返回 False 表示无需继续。"""
@@ -733,71 +663,21 @@ def step_once(render: bool = True) -> bool:
         picking_position = salt_pos + np.array([0.0, 0.00, 0.09])  # 盐瓶顶部
         placing_position = bowl_pos + np.array([0.0, 0.0, 0.2])  # 碗顶部
         
-        # 首次执行时：生成随机抓取姿态
+        # 首次执行时打印位置信息
         if my_controller.get_current_event() == 0 and my_controller.cmd_plan is None:
             print(f"🎯 盐瓶位置: {salt_pos}")
             print(f"🎯 碗位置: {bowl_pos}")
             print(f"🎯 抓取位置: {picking_position}")
             print(f"🎯 放置位置: {placing_position}")
-            
-            # 🎯 生成抓取姿态
-            if my_controller.use_random_grasp:
-                global _seed_grasp_params_cache
-                
-                # 决定使用 Seed 模型还是手动参数
-                if USE_SEED_MODEL:
-                    # 检查是否有缓存
-                    if _seed_grasp_params_cache is not None:
-                        print("\n" + "="*70)
-                        print("♻️ 使用缓存的 Seed 模型抓取姿态（避免重复调用）")
-                        print("="*70)
-                        z_rot, tilt_x, tilt_y = _seed_grasp_params_cache
-                        print(f"📦 缓存参数: Z={z_rot}°, X={tilt_x}°, Y={tilt_y}°")
-                        print("="*70 + "\n")
-                    else:
-                        # 首次调用 Seed 模型
-                        print("\n" + "="*70)
-                        print("🤖 使用豆包 Seed 1.6 Vision 模型估计抓取姿态（首次调用）")
-                        print("="*70)
-                        try:
-                            z_rot, tilt_x, tilt_y = estimate_grasp_pose(
-                                image_path=SEED_IMAGE_PATH,
-                                object_name=SEED_OBJECT_NAME
-                            )
-                            # 保存到缓存
-                            _seed_grasp_params_cache = (z_rot, tilt_x, tilt_y)
-                            print(f"💾 已缓存 Seed 模型结果，后续重置将直接使用")
-                            print("="*70 + "\n")
-                        except Exception as e:
-                            print(f"❌ Seed 模型调用失败: {e}")
-                            print("⚠️ 回退到手动指定参数")
-                            z_rot, tilt_x, tilt_y = GRASP_Z_ROTATION, GRASP_TILT_X, GRASP_TILT_Y
-                            print("="*70 + "\n")
-                else:
-                    print("\n📝 使用手动指定的抓取姿态参数")
-                    z_rot, tilt_x, tilt_y = GRASP_Z_ROTATION, GRASP_TILT_X, GRASP_TILT_Y
-                
-                # 生成抓取姿态四元数
-                my_controller.current_grasp_quat = generate_grasp_pose(
-                    z_rotation=z_rot,
-                    tilt_x=tilt_x,
-                    tilt_y=tilt_y
-                )
-                euler = quaternion_to_euler(my_controller.current_grasp_quat, degrees=True)
-                print(f"🎯 最终抓取姿态:")
-                print(f"   输入参数: Z={z_rot}°, X={tilt_x}°, Y={tilt_y}°")
-                print(f"   四元数: {my_controller.current_grasp_quat}")
-                print(f"   欧拉角 [roll, pitch, yaw]: [{euler[0]:.1f}°, {euler[1]:.1f}°, {euler[2]:.1f}°]\n")
 
         current_joint_positions = my_franka.get_joint_positions()
         current_event = my_controller.get_current_event()
 
-        # === 状态机逻辑（参考 simple_stacking.py）===
+        # === 状态机逻辑（6状态版本）===
         
-        # Event 0, 1, 3, 4, 5, 7: 规划并执行到达目标
-        if current_event in [0, 1, 3, 4, 5, 7]:
-            # ✅ Event 3-5 的夹爪控制已经整合到 _execute_trajectory() 的 ArticulationAction 中
-            # 不再需要单独的夹爪命令，避免冲突
+        # Event 0, 1, 3, 5: 规划并执行到达目标
+        if current_event in [0, 1, 3, 5]:
+            # ✅ Event 3 的夹爪控制已经整合到 _execute_trajectory() 的 ArticulationAction 中
             
             actions = my_controller.forward(
                 picking_position=picking_position,
@@ -808,34 +688,26 @@ def step_once(render: bool = True) -> bool:
             if actions is not None:
                 articulation_controller.apply_action(actions)
             
-            # Event 3 特殊处理：如果规划失败太多次，跳过提升阶段直接去放置
+            # Event 3 (运输) 特殊处理：如果规划失败太多次，跳过此阶段
             if current_event == 3 and my_controller.plan_fail_counter >= 10:
-                print(f"⚠️ Event 3 规划失败 {my_controller.plan_fail_counter} 次，跳过提升阶段")
+                print(f"⚠️ Event 3 规划失败 {my_controller.plan_fail_counter} 次，跳过此阶段")
                 my_controller.plan_fail_counter = 0
                 my_controller.next_event()  # 跳到 Event 4
             
-            # 检查是否到达目标（需要加上偏移，与规划目标保持一致）
+            # 检查是否到达目标
             target_pos = None
-            if current_event == 0:
+            if current_event == 0: # Approach
                 target_pos = picking_position + np.array([0, 0, my_controller.approach_height]) + eef_lateral_offset
-            elif current_event == 1:
+            elif current_event == 1: # Descend
                 target_pos = picking_position + eef_lateral_offset
-            elif current_event == 3:
-                # 使用保存的抓取位置，不要用实时的 picking_position（物体已被抓起）
-                if my_controller.saved_pick_position is not None:
-                    target_pos = my_controller.saved_pick_position + np.array([0, 0, my_controller.lift_height])
-                else:
-                    target_pos = picking_position + np.array([0, 0, my_controller.lift_height]) + eef_lateral_offset
-            elif current_event == 4:
-                target_pos = placing_position + np.array([0, 0, my_controller.approach_height]) + eef_lateral_offset
-            elif current_event == 5:
+            elif current_event == 3: # Transport
                 target_pos = placing_position + eef_lateral_offset
-            elif current_event == 7:
+            elif current_event == 5: # Retreat
                 target_pos = placing_position + np.array([0, 0, my_controller.approach_height]) + eef_lateral_offset
             
             if target_pos is not None:
-                # 调试：打印目标位置和末端位置
-                if my_controller.cmd_plan is None:  # 只在轨迹执行完后检查
+                # 调试
+                if my_controller.cmd_plan is None:
                     try:
                         ee_pos = my_controller.robot.end_effector.get_world_pose()[0]
                         print(f"🔍 Event {current_event} 检查到达:")
@@ -851,10 +723,9 @@ def step_once(render: bool = True) -> bool:
         # Event 2: 抓取（使用力控制闭合夹爪）
         elif current_event == 2:
             # ✅ 使用力控制命令 gripper.forward(action="close")
-            # 夹爪会自动感应物体并停止在接触面，无需手动设置宽度
             if my_controller.wait_counter == 0:
                 print("🤏 开始闭合夹爪（力控制模式）...")
-                my_controller.wait_counter = 100  # 增加等待时间，确保夹爪完全闭合并稳定
+                my_controller.wait_counter = 100  # 增加等待时间
             
             # 持续发送闭合命令（力控制）
             try:
@@ -865,18 +736,16 @@ def step_once(render: bool = True) -> bool:
             
             my_controller.wait_counter -= 1
             
-            # 每15步打印一次进度
             if my_controller.wait_counter % 15 == 0:
                 print(f"   🤏 夹爪闭合中... 剩余 {my_controller.wait_counter} 步")
             
-            # 等待完成后进入下一阶段
             if my_controller.wait_counter == 0:
                 print("📦 夹爪闭合完成，附加物体到 CuRobo")
                 
-                # 🔑 关键：读取并保存夹爪的实际闭合位置
+                # 读取并保存夹爪的实际闭合位置
                 try:
                     gripper_positions = my_franka.gripper.get_joint_positions()
-                    my_controller.gripper_closed_position = gripper_positions[0]  # 两个手指位置相同，取第一个
+                    my_controller.gripper_closed_position = gripper_positions[0]
                     print(f"🔒 保存夹爪闭合位置: {my_controller.gripper_closed_position:.4f}")
                 except Exception as e:
                     print(f"⚠️ 无法读取夹爪位置，使用默认值 0.0: {e}")
@@ -885,26 +754,43 @@ def step_once(render: bool = True) -> bool:
                 # 保存当前抓取位置
                 my_controller.saved_pick_position = picking_position.copy()
                 print(f"📍 保存抓取位置: {my_controller.saved_pick_position}")
-                try:
-                    my_controller._attach_object()
-                    if not my_controller.is_attached:
-                        print("⚠️ 物体附加失败，但继续执行任务")
-                except Exception as e:
-                    print(f"❌ 附加物体异常: {e}")
-                    import traceback
-                    traceback.print_exc()
                 my_controller.next_event()
         
-        # Event 6: 放置（打开夹爪）
-        elif current_event == 6:
-            if my_controller.wait_counter == 0:
-                print("✋ 打开夹爪...")
-                my_controller.wait_counter = my_controller.wait_steps
+        # Event 4: 放置（稳定 -> 打开夹爪）
+        elif current_event == 4:
+            # 1. 稳定阶段
+            if my_controller.stabilize_counter == 0 and my_controller.wait_counter == 0:
+                print("⏳ 到达放置位置，开始稳定 500ms...")
+                my_controller.stabilize_counter = 45 # 30 steps * (1/60s) approx 0.5s (assuming 60hz)
             
+            if my_controller.stabilize_counter > 0:
+                # 保持夹爪闭合 + 保持位置 (隐式，通过不发送新运动指令机器人会维持位置)
+                # 但必须发送夹爪闭合力矩，否则会掉
+                 try:
+                    # 获取当前关节位置(保持手臂不动)
+                    # 此处简单处理：只维持夹爪闭合力
+                    gripper_force = 200.0  # 闭合力
+                    hold_action = ArticulationAction(
+                        joint_efforts=np.array([-gripper_force, -gripper_force]),
+                        joint_indices=[7, 8]
+                    )
+                    articulation_controller.apply_action(hold_action)
+                 except Exception as e:
+                     print(f"⚠️ 稳定阶段夹爪保持失败: {e}")
+
+                 my_controller.stabilize_counter -= 1
+                 if my_controller.stabilize_counter == 0:
+                     print("⏳ 稳定完成，开始打开夹爪...")
+                     my_controller.wait_counter = my_controller.wait_steps # 初始化打开等待
+                 return True # 本次step结束
+
+            # 2. 打开夹爪阶段 (稳定完成后)
+            if my_controller.wait_counter == 0:
+                # (Should not reach here due to logic above, but safety)
+                my_controller.wait_counter = my_controller.wait_steps
+
             # 🔑🔑 关键：必须显式重置夹爪力矩！
-            # Event 3-5 设置了 -200N 的闭合力矩，如果不重置，夹爪无法打开
             try:
-                # 获取夹爪打开位置
                 if hasattr(my_franka.gripper, "joint_opened_positions"):
                     gripper_open_pos = my_franka.gripper.joint_opened_positions[0]
                 else:
@@ -921,11 +807,6 @@ def step_once(render: bool = True) -> bool:
                 articulation_controller.apply_action(open_action)
             except Exception as e:
                 print(f"⚠️ 夹爪打开命令失败: {e}")
-                # 备用方法
-                try:
-                    my_franka.gripper.open()
-                except:
-                    pass
             
             my_controller.wait_counter -= 1
             if my_controller.wait_counter == 0:
@@ -934,7 +815,7 @@ def step_once(render: bool = True) -> bool:
                 my_controller._detach_object()
                 my_controller.next_event()
         
-        # Event 8+: 完成
+        # Event 6+: 完成
         else:
             print("\n🎉 任务完成！\n")
             for _ in range(30):
@@ -951,5 +832,6 @@ if __name__ == "__main__":
     finally:
         simulation_app.close()
 
-# 运行命令
-# /home/di-gua/isaac-sim/python.sh pick_place_localFranka_curobo_scipy_seed.py
+# 运行命令:
+# /home/di-gua/isaac-sim/python.sh /home/di-gua/licheng/manipulation/manipulation_collect809/pick_place_localFranka_curobo_5states.py
+# omni_python /home/yons/data/manipulation_collect809/pick_place_localFranka_curobo_5states.py

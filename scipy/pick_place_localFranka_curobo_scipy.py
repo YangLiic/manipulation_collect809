@@ -50,8 +50,8 @@ from curobo.util.usd_helper import UsdHelper
 from curobo.util_file import get_robot_configs_path, get_world_configs_path, join_path, load_yaml
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig
 
-# Import grasp pose generator (指定姿态版本)
-from grasp_pose_generator_specified import generate_grasp_pose, quaternion_to_euler
+# Import grasp pose generator
+from scipy.grasp_pose_generator import generate_grasp_pose
 
 # 优先使用 omni.isaac.franka 的 Franka 包装类
 try:
@@ -60,7 +60,7 @@ except Exception:
     Franka = None
 
 # 加载场景 USD
-open_stage("/home/di-gua/licheng/manipulation/Collected_World1/World0.usd")
+open_stage("/home/yons/data/Collected_World1/World0.usd")
 simulation_app.update()
 
 # 创建 World
@@ -73,7 +73,7 @@ bowl = XFormPrim("/World/Bowl_0")
 # 固定放置位置
 fixed_spawn_pos = np.array([0.0, 0.6, -0.25], dtype=float)
 
-FRANKA_LOCAL_USD = "Franka_usd/Franka.usd"
+FRANKA_LOCAL_USD = "/home/yons/data/Franka_usd/Franka.usd"
 FRANKA_REFERENCE_PATH = "/World/Franka"
 FRANKA_NESTED_PATH = "/World/Franka/franka"
 
@@ -678,17 +678,6 @@ reset_needed = False
 placing_height_offset = 0.10 #放置时高度
 eef_lateral_offset = np.array([0.0, 0.0, 0.02])  # 夹取时偏移
 
-# ========== 🎯 抓取姿态参数（用户可修改）==========
-# Z 轴旋转角度（度）：正值为顺时针，范围 -90 到 +90
-GRASP_Z_ROTATION = +30
-
-# X 轴倾斜角度（度）：范围 -90 到 +90
-GRASP_TILT_X = 0.0
-
-# Y 轴倾斜角度（度）：范围 -90 到 +90
-GRASP_TILT_Y = 0.0
-# ================================================
-
 
 def step_once(render: bool = True) -> bool:
     """执行一次仿真和控制循环，返回 False 表示无需继续。"""
@@ -726,16 +715,15 @@ def step_once(render: bool = True) -> bool:
             print(f"🎯 抓取位置: {picking_position}")
             print(f"🎯 放置位置: {placing_position}")
             
-            # 🎯 生成指定的抓取姿态
+            # 🎲 生成随机抓取姿态
             if my_controller.use_random_grasp:
                 my_controller.current_grasp_quat = generate_grasp_pose(
-                    z_rotation=GRASP_Z_ROTATION,  # 使用用户指定的 Z 轴旋转
-                    tilt_x=GRASP_TILT_X,          # 使用用户指定的 X 轴倾斜
-                    tilt_y=GRASP_TILT_Y           # 使用用户指定的 Y 轴倾斜
+                    z_rotation_range=(-180, 180),  # 全范围 Z 轴旋转
+                    tilt_range=(-3, 3)  # ±3° 轻微倾斜
                 )
+                from grasp_pose_generator import quaternion_to_euler
                 euler = quaternion_to_euler(my_controller.current_grasp_quat, degrees=True)
-                print(f"🎯 生成指定抓取姿态:")
-                print(f"   输入参数: Z={GRASP_Z_ROTATION}°, X={GRASP_TILT_X}°, Y={GRASP_TILT_Y}°")
+                print(f"🎲 生成随机抓取姿态:")
                 print(f"   四元数: {my_controller.current_grasp_quat}")
                 print(f"   欧拉角 [roll, pitch, yaw]: [{euler[0]:.1f}°, {euler[1]:.1f}°, {euler[2]:.1f}°]")
 
@@ -901,5 +889,5 @@ if __name__ == "__main__":
     finally:
         simulation_app.close()
 
-# 运行命令
-# /home/di-gua/isaac-sim/python.sh pick_place_localFranka_curobo_scipy_specified.py
+# 运行命令:
+# /home/di-gua/isaac-sim/python.sh /home/di-gua/licheng/manipulation/manipulation_collect/pick_place_localFranka_curobo.py

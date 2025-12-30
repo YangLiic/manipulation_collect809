@@ -5,7 +5,7 @@ Tests that poses are generated correctly before running full simulation
 """
 
 import numpy as np
-from grasp_pose_generator import generate_grasp_pose, quaternion_to_euler
+from scipy.grasp_pose_generator import generate_grasp_pose, quaternion_to_euler
 
 print("🧪 Testing Scipy Grasp Pose Generator Integration\n")
 print("=" * 60)

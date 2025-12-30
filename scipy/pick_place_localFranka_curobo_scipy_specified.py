@@ -51,127 +51,13 @@ from curobo.util_file import get_robot_configs_path, get_world_configs_path, joi
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig
 
 # Import grasp pose generator (指定姿态版本)
-from grasp_pose_generator_specified import generate_grasp_pose, quaternion_to_euler
-
-# Import Seed 模型抓取姿态估计
-from estimate_grasp_pose_seed import estimate_grasp_pose
+from scipy.grasp_pose_generator_specified import generate_grasp_pose, quaternion_to_euler
 
 # 优先使用 omni.isaac.franka 的 Franka 包装类
 try:
     from omni.isaac.franka import Franka
 except Exception:
     Franka = None
-
-# 添加 USD 相关导入用于 bounding box 计算
-from pxr import UsdGeom, Gf, Usd
-import omni.usd
-
-def get_object_bounding_box(prim_path: str):
-    """
-    获取物体的世界坐标系 bounding box
-    
-    参数:
-        prim_path: 物体的 USD 路径
-        
-    返回:
-        (min_point, max_point): bounding box 的最小和最大点 (世界坐标)
-        如果失败返回 None
-    """
-    try:
-        stage = omni.usd.get_context().get_stage()
-        prim = stage.GetPrimAtPath(prim_path)
-        
-        if prim.IsValid():
-            bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ['default'])
-            bound = bbox_cache.ComputeWorldBound(prim)
-            bbox = bound.ComputeAlignedBox()
-            
-            min_point = bbox.GetMin()
-            max_point = bbox.GetMax()
-            
-            # 转换为 numpy 数组
-            min_array = np.array([min_point[0], min_point[1], min_point[2]])
-            max_array = np.array([max_point[0], max_point[1], max_point[2]])
-            
-            return (min_array, max_array)
-    except Exception as e:
-        print(f"⚠️ 获取 bounding box 失败: {e}")
-        return None
-    
-    return None
-
-def calculate_height_offset(
-    pick_obj_path: str, 
-    pick_pos: np.ndarray, 
-    place_obj_path: str,
-    place_pos: np.ndarray,
-    target_offset_from_top: float = 0.03
-):
-    """
-    计算抓取和放置高度偏移
-    
-    参数:
-        pick_obj_path: 抓取物体的 USD 路径
-        pick_pos: 抓取物体中心位置 (世界坐标)
-        place_obj_path: 放置物体的 USD 路径
-        place_pos: 放置物体中心位置 (世界坐标)
-        target_offset_from_top: 目标位置相对于物体顶部的偏移 (默认 0.03m)
-        
-    返回:
-        (pick_height_offset, placing_height_offset): 抓取和放置的高度偏移
-        如果计算失败返回 None
-    """
-    # 获取抓取物体的 bounding box
-    pick_bbox = get_object_bounding_box(pick_obj_path)
-    if pick_bbox is None:
-        print(f"⚠️ 无法获取抓取物体 bounding box，无法自动计算高度偏移")
-        return None
-    
-    pick_min, pick_max = pick_bbox
-    pick_object_bottom_z = pick_min[2]
-    pick_object_top_z = pick_max[2]
-    pick_object_height = pick_object_top_z - pick_object_bottom_z
-    
-    # 计算抓取高度偏移
-    if pick_object_height <= 0.040:
-        pick_height_offset = 0.0
-        print(f"🔧 自动计算抓取高度偏移:")
-        print(f"   抓取物体中心 Z: {pick_pos[2]:.3f}m")
-        print(f"   抓取物体高度: {pick_object_height:.3f}m")
-        print(f"   ⚠️ 物体高度 ≤ {target_offset_from_top}m，使用偏移 0（抓取中心）")
-    else:
-        # 目标位置：顶部 - target_offset_from_top
-        target_z = pick_object_top_z - target_offset_from_top
-        pick_height_offset = target_z - pick_pos[2]
-        
-        print(f"🔧 自动计算抓取高度偏移:")
-        print(f"   抓取物体中心 Z: {pick_pos[2]:.3f}m")
-        print(f"   抓取物体顶部 Z: {pick_object_top_z:.3f}m")
-        print(f"   抓取物体高度: {pick_object_height:.3f}m")
-        print(f"   目标 Z: {target_z:.3f}m (顶部 - {target_offset_from_top}m)")
-        print(f"   抓取偏移: {pick_height_offset:.3f}m")
-    
-    # 获取放置物体的 bounding box
-    place_bbox = get_object_bounding_box(place_obj_path)
-    if place_bbox is None:
-        print(f"⚠️ 无法获取放置物体 bounding box，放置偏移使用抓取偏移")
-        placing_height_offset = pick_height_offset
-    else:
-        place_min, place_max = place_bbox
-        place_object_top_z = place_max[2]
-        
-        # 放置高度 = 放置物体顶部 + 抓取物体高度
-        target_place_z = place_object_top_z + pick_object_height
-        placing_height_offset = target_place_z - place_pos[2]
-        
-        print(f"🔧 自动计算放置高度偏移:")
-        print(f"   放置物体中心 Z: {place_pos[2]:.3f}m")
-        print(f"   放置物体顶部 Z: {place_object_top_z:.3f}m")
-        print(f"   目标放置 Z: {target_place_z:.3f}m (放置物体顶部 + 抓取物体高度 {pick_object_height:.3f}m)")
-        print(f"   放置偏移: {placing_height_offset:.3f}m")
-    
-    return (pick_height_offset, placing_height_offset)
-
 
 # 加载场景 USD
 open_stage("/home/di-gua/licheng/manipulation/Collected_World1/World0.usd")
@@ -180,89 +66,12 @@ simulation_app.update()
 # 创建 World
 my_world = World(stage_units_in_meters=1.0)
 
-# 对象引用已移至 step_once 函数参数中
-
-# ============================================================
-# 数据采集模式配置变量（供 collect_curobo.py 使用）
-# ============================================================
-_COLLECT_PICK_OBJ_PATH = "/World/SaltShaker_3"
-_COLLECT_PLACE_OBJ_PATH = "/World/CuttingBoard_4"
-_COLLECT_AUTO_HEIGHT_OFFSET = True
-_COLLECT_PICK_HEIGHT_OFFSET = 0.23
-_COLLECT_PLACING_HEIGHT_OFFSET = 0.23
-_COLLECT_EEF_LATERAL_OFFSET = None
-_COLLECT_APPROACH_HEIGHT = 0.15
-_COLLECT_LIFT_HEIGHT = 0.05
-_COLLECT_USE_SEED_MODEL = True
-_COLLECT_SEED_IMAGE_PATH = "/home/di-gua/data/seed-one-errors.png"
-_COLLECT_SEED_OBJECT_NAME = "bottle"
-_COLLECT_RENDER = True
-
-def configure_collection(
-    pick_obj: str = None,
-    place_obj: str = None,
-    auto_height_offset: bool = None,
-    pick_height_offset: float = None,
-    placing_height_offset: float = None,
-    eef_lateral_offset = None,
-    approach_height: float = None,
-    lift_height: float = None,
-    use_seed_model: bool = None,
-    seed_image_path: str = None,
-    seed_object_name: str = None,
-    render: bool = None,
-):
-    """
-    配置数据采集模式的参数
-    
-    参数:
-        pick_obj: 抓取物体路径
-        place_obj: 放置物体路径
-        auto_height_offset: 是否自动计算高度偏移
-        pick_height_offset: 手动抓取高度偏移
-        placing_height_offset: 手动放置高度偏移
-        eef_lateral_offset: 末端执行器横向偏移
-        approach_height: 接近高度
-        lift_height: 抬升高度
-        use_seed_model: 是否使用 Seed 模型
-        seed_image_path: Seed 模型图片路径
-        seed_object_name: Seed 模型物体名称
-        render: 是否渲染
-    """
-    global _COLLECT_PICK_OBJ_PATH, _COLLECT_PLACE_OBJ_PATH
-    global _COLLECT_AUTO_HEIGHT_OFFSET, _COLLECT_PICK_HEIGHT_OFFSET
-    global _COLLECT_PLACING_HEIGHT_OFFSET, _COLLECT_EEF_LATERAL_OFFSET
-    global _COLLECT_APPROACH_HEIGHT, _COLLECT_LIFT_HEIGHT
-    global _COLLECT_USE_SEED_MODEL, _COLLECT_SEED_IMAGE_PATH
-    global _COLLECT_SEED_OBJECT_NAME, _COLLECT_RENDER
-    
-    if pick_obj is not None:
-        _COLLECT_PICK_OBJ_PATH = pick_obj
-    if place_obj is not None:
-        _COLLECT_PLACE_OBJ_PATH = place_obj
-    if auto_height_offset is not None:
-        _COLLECT_AUTO_HEIGHT_OFFSET = auto_height_offset
-    if pick_height_offset is not None:
-        _COLLECT_PICK_HEIGHT_OFFSET = pick_height_offset
-    if placing_height_offset is not None:
-        _COLLECT_PLACING_HEIGHT_OFFSET = placing_height_offset
-    if eef_lateral_offset is not None:
-        _COLLECT_EEF_LATERAL_OFFSET = eef_lateral_offset
-    if approach_height is not None:
-        _COLLECT_APPROACH_HEIGHT = approach_height
-    if lift_height is not None:
-        _COLLECT_LIFT_HEIGHT = lift_height
-    if use_seed_model is not None:
-        _COLLECT_USE_SEED_MODEL = use_seed_model
-    if seed_image_path is not None:
-        _COLLECT_SEED_IMAGE_PATH = seed_image_path
-    if seed_object_name is not None:
-        _COLLECT_SEED_OBJECT_NAME = seed_object_name
-    if render is not None:
-        _COLLECT_RENDER = render
+# 包装场景中现有的对象
+salt = XFormPrim("/World/Vegetable_7")
+bowl = XFormPrim("/World/Bowl_0")
 
 # 固定放置位置
-fixed_spawn_pos = np.array([0.0, 0.5, -0.2], dtype=float)
+fixed_spawn_pos = np.array([0.0, 0.6, -0.25], dtype=float)
 
 FRANKA_LOCAL_USD = "Franka_usd/Franka.usd"
 FRANKA_REFERENCE_PATH = "/World/Franka"
@@ -350,13 +159,8 @@ class CuroboPickPlaceController:
         self.franka_prim_path = franka_prim_path
         
         # 高度常量 - 用于所有事件的高度计算
-        self.approach_height = 0.15  # 接近高度
+        self.approach_height = 0.10  # 接近高度
         self.lift_height = 0.10      # 抬升高度
-        
-        # TCP 偏移补偿：panda_hand 到夹爪指尖的距离
-        # CuRobo 使用 panda_hand 作为 ee_link，但实际接触点在指尖
-        # 这个偏移量补偿了从 panda_hand 到指尖的 Z 轴距离
-        self.tcp_z_offset = 0.058  # 约 5.8cm
         
         # 获取机器人基座的世界位置
         robot_base_prim = XFormPrim(franka_prim_path)
@@ -403,9 +207,9 @@ class CuroboPickPlaceController:
             trajopt_tsteps=32,
             collision_checker_type=CollisionCheckerType.MESH,
             use_cuda_graph=True,
-            interpolation_dt=0.02,  # 增大时间步长，降低执行速度，减少晃动
+            interpolation_dt=0.01,
             collision_cache={"obb": 50, "mesh": 30},
-            collision_activation_distance=0.005,  # 增加容忍度
+            collision_activation_distance=0.10,  # 增加容忍度
         )
         
         self.motion_gen = MotionGen(motion_gen_config)
@@ -440,14 +244,11 @@ class CuroboPickPlaceController:
         self.gripper_closed_position = 0.0  # 夹爪闭合时的位置（每个手指）
         
         # 阈值
-        self.position_threshold = 0.02  # 8cm（放宽阈值，因为轨迹执行完即可认为到达）
+        self.position_threshold = 0.08  # 8cm（放宽阈值，因为轨迹执行完即可认为到达）
         
         # 🎯 随机抓取姿态生成器
         self.use_random_grasp = True  # 启用随机抓取姿态
         self.current_grasp_quat = None  # 当前生成的抓取姿态
-        
-        # 🎯 目标物体路径（用于动态附着）
-        self.target_object_path = None  # 将由 step_once 设置
         
         print("✅ CuRobo MotionGen 初始化完成")
     
@@ -505,18 +306,17 @@ class CuroboPickPlaceController:
             self.franka_prim_path, 
             "/World/defaultGroundPlane", 
             "/curobo",
-            "/World/Table_1",
-            "/World/Vegetable_7",  
-            #"/World/Bowl_0",       
-            "/World/Bottle_2",      
-            "/World/Bottle_12",    
+            "/World/Vegetable_7",  # 忽略要抓取的物体
+            "/World/Bowl_0",       # 忽略碗
+            # 暂时忽略其他物体以简化规划
+            #"/World/Bottle",
             "/World/Scissors",
             "/World/Vegetable_8",
             "/World/Vegetable_9",
             "/World/Garlic",
             "/World/Peeler",
-            "/World/SaltShaker_3",
-            "/World/CuttingBoard_4",  
+            #"/World/SaltShaker",
+            "/World/CuttingBoard",
         ]
         obstacles = self.usd_help.get_obstacles_from_stage(
             only_paths=["/World"],
@@ -576,34 +376,34 @@ class CuroboPickPlaceController:
             ee_quat = np.array([0.0, 1.0, 0.0, 0.0])  # 朝下 (w, x, y, z)
         
         if self.current_event == 0:  # 接近抓取
-            pos = picking_position + np.array([0, 0, self.approach_height + self.tcp_z_offset]) + offset
+            pos = picking_position + np.array([0, 0, self.approach_height]) + offset
             return (pos, ee_quat)
         elif self.current_event == 1:  # 下降抓取
-            pos = picking_position + np.array([0, 0, self.tcp_z_offset]) + offset
+            pos = picking_position + offset
             return (pos, ee_quat)
         elif self.current_event == 2:  # 抓取（夹爪控制移到主循环）
             return None  # 不规划，等待夹爪闭合
         elif self.current_event == 3:  # 附着物体并提升
-            if not self.is_attached and self.target_object_path:
-                self._attach_object(self.target_object_path)
+            if not self.is_attached:
+                self._attach_object()
             # 使用保存的抓取位置，而不是物体当前位置（物体已随机器人移动）
             if self.saved_pick_position is not None:
-                pos = self.saved_pick_position + np.array([0, 0, self.lift_height + self.tcp_z_offset]) + offset
+                pos = self.saved_pick_position + np.array([0, 0, self.lift_height]) + offset
             else:
-                pos = picking_position + np.array([0, 0, self.lift_height + self.tcp_z_offset]) + offset
+                pos = picking_position + np.array([0, 0, self.lift_height]) + offset
             return (pos, ee_quat)
         elif self.current_event == 4:  # 接近放置
-            pos = placing_position + np.array([0, 0, self.approach_height + self.tcp_z_offset]) + offset
+            pos = placing_position + np.array([0, 0, self.approach_height]) + offset
             return (pos, ee_quat)
         elif self.current_event == 5:  # 下降放置
-            pos = placing_position + np.array([0, 0, self.tcp_z_offset]) + offset
+            pos = placing_position + offset
             return (pos, ee_quat)
         elif self.current_event == 6:  # 放置（夹爪控制移到主循环）
             return None  # 不规划，等待夹爪打开
         elif self.current_event == 7:  # 分离物体并后退
             if self.is_attached:
                 self._detach_object()
-            pos = placing_position + np.array([0, 0, self.approach_height + self.tcp_z_offset]) + offset
+            pos = placing_position + np.array([0, 0, self.approach_height]) + offset
             return (pos, ee_quat)
         else:  # 完成
             return None
@@ -614,7 +414,7 @@ class CuroboPickPlaceController:
         
         # 调试输出：世界坐标
         print(f"📍 Event {self.current_event}:")
-        print(f"   世界坐标目标位置（Panda hand）: {pos_world}")
+        print(f"   世界坐标目标位置: {pos_world}")
         print(f"   机器人基座位置: {self.robot_base_position}")
         
         # ✅ CuRobo 使用相对于机器人基座的坐标系
@@ -721,43 +521,67 @@ class CuroboPickPlaceController:
             self._step_idx += 1
             return None
     
-    def _attach_object(self, target_object_path: str):
-        """附着物体
+    def _attach_object(self):
+        """附着物体"""
+        # 在附加之前，需要先更新世界模型，包含要抓取的物体
+        # 这样 CuRobo 才能找到物体并附加
+        print("🔄 更新世界模型以包含物体...")
+        ignore_substring = [
+            self.franka_prim_path, 
+            "/World/defaultGroundPlane", 
+            "/curobo",
+            # 不要忽略 Vegetable_7，因为我们要附加它
+            "/World/Bowl_0",
+            "/World/Bottle",
+            "/World/Scissors",
+            "/World/Vegetable_8",
+            "/World/Vegetable_9",
+            "/World/Garlic",
+            "/World/Peeler",
+            "/World/SaltShaker",
+            "/World/CuttingBoard",
+        ]
+        obstacles_with_object = self.usd_help.get_obstacles_from_stage(
+            only_paths=["/World"],
+            ignore_substring=ignore_substring,
+            reference_prim_path=self.franka_prim_path,
+        )
+        obstacles_with_object.add_obstacle(self._world_cfg_table.cuboid[0])
+        collision_world = obstacles_with_object.get_collision_check_world()
+        self.motion_gen.update_world(collision_world)
         
-        Args:
-            target_object_path: 要附加的物体的 USD 路径，例如 "/World/Bottle_2"
-        """
-        # 🔑 优化：直接指定要附加的物体路径，而不是通过排除法
-        print(f"🔄 直接获取目标物体: {target_object_path}")
-        
-        # 方法1: 尝试直接从 stage 获取单个物体
+        # 从障碍物配置中查找包含 "Vegetable_7" 的对象名称
+        object_name = None
         try:
-            # 使用 only_paths 直接指定物体路径
-            obstacles_with_object = self.usd_help.get_obstacles_from_stage(
-                only_paths=[target_object_path],
-                reference_prim_path=self.franka_prim_path,
-            )
+            # 方法1: 从 WorldConfig 中查找 mesh 对象
+            if obstacles_with_object.mesh is not None:
+                for mesh_obj in obstacles_with_object.mesh:
+                    if "Vegetable_7" in mesh_obj.name or "Vegetable_7" in str(mesh_obj):
+                        object_name = mesh_obj.name
+                        print(f"✅ 从 WorldConfig 找到物体: {object_name}")
+                        break
             
-            # 检查是否成功获取到物体
-            object_name = None
-            if obstacles_with_object.mesh is not None and len(obstacles_with_object.mesh) > 0:
-                object_name = obstacles_with_object.mesh[0].name
-                print(f"✅ 直接获取到物体: {object_name}")
-            else:
-                # 备用：使用路径作为名称
-                object_name = target_object_path
-                print(f"⚠️ 未找到 mesh，使用路径: {object_name}")
+            # 方法2: 从世界模型中查找
+            if object_name is None:
+                obstacle_names = self.motion_gen.world_collision.get_obstacle_names(env_idx=0)
+                print(f"🔍 世界模型中的对象: {obstacle_names}")
+                
+                # 查找包含 "Vegetable_7" 的对象
+                for name in obstacle_names:
+                    if "Vegetable_7" in name:
+                        object_name = name
+                        print(f"✅ 从世界模型找到物体: {object_name}")
+                        break
             
-            # 更新世界模型（包含目标物体）
-            collision_world = obstacles_with_object.get_collision_check_world()
-            self.motion_gen.update_world(collision_world)
-            
+            # 方法3: 直接使用 prim 路径
+            if object_name is None:
+                object_name = "/World/Vegetable_7"
+                print(f"⚠️ 未找到对象，使用 prim 路径: {object_name}")
         except Exception as e:
-            print(f"⚠️ 直接获取物体失败: {e}，使用备用方法")
-            # 备用方法：使用路径
-            object_name = target_object_path
+            print(f"⚠️ 查找对象名称失败: {e}，使用默认路径")
+            object_name = "/World/Vegetable_7"
         
-        # 附加物体到机器人
+        # 现在可以附加物体了
         sim_js = self.robot.get_joints_state()
         cu_js = JointState(
             position=self.tensor_args.to_device(sim_js.positions),
@@ -766,7 +590,6 @@ class CuroboPickPlaceController:
             jerk=self.tensor_args.to_device(sim_js.velocities) * 0.0,
             joint_names=self.robot.dof_names,
         )
-        
         try:
             print(f"📦 尝试附加物体: {object_name}")
             self.motion_gen.attach_objects_to_robot(
@@ -781,7 +604,7 @@ class CuroboPickPlaceController:
             # ✅ 重要：附加成功后，更新世界模型，移除已附着的物体
             # 因为物体现在附着在机器人上，不应该再作为独立的障碍物
             print("🔄 更新世界模型，移除已附着的物体...")
-            self._update_world()
+            self._update_world()  # 这会忽略 Vegetable_7
             self.motion_gen.update_world(self._world_cfg.get_collision_check_world())
             print("✅ 世界模型已更新（物体已移除）")
         except Exception as e:
@@ -851,62 +674,25 @@ _force_open_gripper()
 
 reset_needed = False
 
-# 🔄 Seed 模型结果缓存（避免重复调用）
-_seed_grasp_params_cache = None  # 缓存格式: (z_rot, tilt_x, tilt_y)
+# 可调参数
+placing_height_offset = 0.10 #放置时高度
+eef_lateral_offset = np.array([0.0, 0.0, 0.02])  # 夹取时偏移
 
-# 🔄 高度偏移计算缓存（避免重复计算）
-_height_offset_calculated = False
-_cached_pick_height_offset = None
-_cached_placing_height_offset = None
+# ========== 🎯 抓取姿态参数（用户可修改）==========
+# Z 轴旋转角度（度）：正值为顺时针，范围 -90 到 +90
+GRASP_Z_ROTATION = +30
 
-# 所有可调参数已移至 step_once 函数参数中
+# X 轴倾斜角度（度）：范围 -90 到 +90
+GRASP_TILT_X = 0.0
+
+# Y 轴倾斜角度（度）：范围 -90 到 +90
+GRASP_TILT_Y = 0.0
+# ================================================
 
 
-def step_once(
-    pick_obj_path: str = "/World/Bottle_2",
-    place_obj_path: str = "/World/CuttingBoard_4",
-    auto_height_offset: bool = True,
-    pick_height_offset: float = 0.23,
-    placing_height_offset: float = 0.23,
-    eef_lateral_offset: np.ndarray = None,
-    use_seed_model: bool = False,
-    seed_image_path: str = "./image/grasp_scene.jpeg",
-    seed_object_name: str = "黄瓜",
-    grasp_z_rotation: float = 0.0,
-    grasp_tilt_x: float = 0.0,
-    grasp_tilt_y: float = 0.0,
-    render: bool = True
-) -> bool:
-    """
-    执行一次仿真和控制循环
-    
-    参数:
-        pick_obj_path: 要抓取的物体的 USD 路径，例如 "/World/Bottle_2"
-        place_obj_path: 放置目标物体的 USD 路径，例如 "/World/CuttingBoard_4"
-        auto_height_offset: 是否自动计算高度偏移（基于物体 bounding box）
-        pick_height_offset: 抓取时高度偏移（auto_height_offset=False 时使用）
-        placing_height_offset: 放置时高度偏移（auto_height_offset=False 时使用）
-        eef_lateral_offset: 夹取时末端偏移
-        use_seed_model: 是否使用 Seed 模型估计抓取姿态
-        seed_image_path: Seed 模型输入图像路径
-        seed_object_name: 要抓取的物体名称（用于 Seed 模型 prompt）
-        grasp_z_rotation: 手动指定的 Z 轴旋转角度（度）
-        grasp_tilt_x: 手动指定的 X 轴倾斜角度（度）
-        grasp_tilt_y: 手动指定的 Y 轴倾斜角度（度）
-        render: 是否渲染
-        
-    返回:
-        bool: False 表示无需继续
-    """
-    global reset_needed, _height_offset_calculated, _cached_pick_height_offset, _cached_placing_height_offset
-    
-    # 根据路径创建 XFormPrim 对象
-    pick_obj = XFormPrim(pick_obj_path)
-    place_obj = XFormPrim(place_obj_path)
-    
-    # 设置默认偏移
-    if eef_lateral_offset is None:
-        eef_lateral_offset = np.array([0.0, 0.0, 0.052])
+def step_once(render: bool = True) -> bool:
+    """执行一次仿真和控制循环，返回 False 表示无需继续。"""
+    global reset_needed
 
     if not simulation_app.is_running():
         return False
@@ -918,118 +704,40 @@ def step_once(
 
     if my_world.is_playing():
         if reset_needed:
-
             my_world.reset()
             my_controller.reset()
             _force_open_gripper()
-            # 重置高度偏移缓存
-            _height_offset_calculated = False
-            _cached_pick_height_offset = None
-            _cached_placing_height_offset = None
             reset_needed = False
 
-        # 获取抓取物体与放置物体的世界位姿
-        pick_positions, _ = pick_obj.get_world_poses()
-        place_positions, _ = place_obj.get_world_poses()
-        pick_pos = pick_positions[0]
-        place_pos = place_positions[0]
+        # 获取盐瓶与碗的世界位姿
+        salt_positions, _ = salt.get_world_poses()
+        bowl_positions, _ = bowl.get_world_poses()
+        salt_pos = salt_positions[0]
+        bowl_pos = bowl_positions[0]
 
-        # 修正：使用物体顶部位置
-        # 如果已经计算过，使用缓存的偏移值；否则使用函数参数
-        if _height_offset_calculated and _cached_pick_height_offset is not None:
-            current_pick_offset = _cached_pick_height_offset
-            current_place_offset = _cached_placing_height_offset
-        else:
-            current_pick_offset = pick_height_offset
-            current_place_offset = placing_height_offset
-            
-        picking_position = pick_pos + np.array([0.0, 0.00, current_pick_offset])
-        placing_position = place_pos + np.array([0.0, 0.0, current_place_offset])
+        # 修正：使用物体顶部位置，假设物体高度约 0.05m
+        picking_position = salt_pos + np.array([0.0, 0.00, 0.09])  # 盐瓶顶部
+        placing_position = bowl_pos + np.array([0.0, 0.0, 0.2])  # 碗顶部
         
-        # 首次执行时：生成抓取姿态并计算高度偏移
+        # 首次执行时：生成随机抓取姿态
         if my_controller.get_current_event() == 0 and my_controller.cmd_plan is None:
-            
-            print(f"🎯 抓取物体位置: {pick_pos}")
-            print(f"🎯 放置物体位置: {place_pos}")
-            
-            # 🔧 自动计算或使用手动指定的高度偏移（仅首次执行）
-            if auto_height_offset and not _height_offset_calculated:
-                result = calculate_height_offset(
-                    pick_obj_path, pick_pos, 
-                    place_obj_path, place_pos,
-                    target_offset_from_top=0.03
-                )
-                if result is not None:
-                    _cached_pick_height_offset, _cached_placing_height_offset = result
-                    _height_offset_calculated = True  # 标记已计算
-                    # 更新当前使用的偏移值
-                    current_pick_offset = _cached_pick_height_offset
-                    current_place_offset = _cached_placing_height_offset
-                else:
-                    print(f"⚠️ 使用手动偏移值: pick={pick_height_offset}, place={placing_height_offset}")
-                    # 缓存手动值
-                    _cached_pick_height_offset = pick_height_offset
-                    _cached_placing_height_offset = placing_height_offset
-            
-            # 重新计算位置（使用更新后的偏移）
-            picking_position = pick_pos + np.array([0.0, 0.00, current_pick_offset])
-            placing_position = place_pos + np.array([0.0, 0.0, current_place_offset])
-            
+            print(f"🎯 盐瓶位置: {salt_pos}")
+            print(f"🎯 碗位置: {bowl_pos}")
             print(f"🎯 抓取位置: {picking_position}")
             print(f"🎯 放置位置: {placing_position}")
             
-            # 🔑 设置目标物体路径（用于后续附着操作）
-            my_controller.target_object_path = pick_obj_path
-            print(f"🎯 目标物体路径: {pick_obj_path}")
-            
-            # 🎯 生成抓取姿态
+            # 🎯 生成指定的抓取姿态
             if my_controller.use_random_grasp:
-                global _seed_grasp_params_cache
-                
-                # 决定使用 Seed 模型还是手动参数
-                if use_seed_model:
-                    # 检查是否有缓存
-                    if _seed_grasp_params_cache is not None:
-                        print("\n" + "="*70)
-                        print("♻️ 使用缓存的 Seed 模型抓取姿态（避免重复调用）")
-                        print("="*70)
-                        z_rot, tilt_x, tilt_y = _seed_grasp_params_cache
-                        print(f"📦 缓存参数: Z={z_rot}°, X={tilt_x}°, Y={tilt_y}°")
-                        print("="*70 + "\n")
-                    else:
-                        # 首次调用 Seed 模型
-                        print("\n" + "="*70)
-                        print("🤖 使用豆包 Seed 1.6 Vision 模型估计抓取姿态（首次调用）")
-                        print("="*70)
-                        try:
-                            z_rot, tilt_x, tilt_y = estimate_grasp_pose(
-                                image_path=seed_image_path,
-                                object_name=seed_object_name
-                            )
-                            # 保存到缓存
-                            _seed_grasp_params_cache = (z_rot, tilt_x, tilt_y)
-                            print(f"💾 已缓存 Seed 模型结果，后续重置将直接使用")
-                            print("="*70 + "\n")
-                        except Exception as e:
-                            print(f"❌ Seed 模型调用失败: {e}")
-                            print("⚠️ 回退到手动指定参数")
-                            z_rot, tilt_x, tilt_y = grasp_z_rotation, grasp_tilt_x, grasp_tilt_y
-                            print("="*70 + "\n")
-                else:
-                    print("\n📝 使用手动指定的抓取姿态参数")
-                    z_rot, tilt_x, tilt_y = grasp_z_rotation, grasp_tilt_x, grasp_tilt_y
-                
-                # 生成抓取姿态四元数
                 my_controller.current_grasp_quat = generate_grasp_pose(
-                    z_rotation=z_rot,
-                    tilt_x=tilt_x,
-                    tilt_y=tilt_y
+                    z_rotation=GRASP_Z_ROTATION,  # 使用用户指定的 Z 轴旋转
+                    tilt_x=GRASP_TILT_X,          # 使用用户指定的 X 轴倾斜
+                    tilt_y=GRASP_TILT_Y           # 使用用户指定的 Y 轴倾斜
                 )
                 euler = quaternion_to_euler(my_controller.current_grasp_quat, degrees=True)
-                print(f"🎯 最终抓取姿态:")
-                print(f"   输入参数: Z={z_rot}°, X={tilt_x}°, Y={tilt_y}°")
+                print(f"🎯 生成指定抓取姿态:")
+                print(f"   输入参数: Z={GRASP_Z_ROTATION}°, X={GRASP_TILT_X}°, Y={GRASP_TILT_Y}°")
                 print(f"   四元数: {my_controller.current_grasp_quat}")
-                print(f"   欧拉角 [roll, pitch, yaw]: [{euler[0]:.1f}°, {euler[1]:.1f}°, {euler[2]:.1f}°]\n")
+                print(f"   欧拉角 [roll, pitch, yaw]: [{euler[0]:.1f}°, {euler[1]:.1f}°, {euler[2]:.1f}°]")
 
         current_joint_positions = my_franka.get_joint_positions()
         current_event = my_controller.get_current_event()
@@ -1081,8 +789,8 @@ def step_once(
                     try:
                         ee_pos = my_controller.robot.end_effector.get_world_pose()[0]
                         print(f"🔍 Event {current_event} 检查到达:")
-                        print(f"   目标位置(世界)（手指末端）: {target_pos}")
-                        print(f"   末端位置(世界)（手指末端）: {ee_pos}")
+                        print(f"   目标位置(世界): {target_pos}")
+                        print(f"   末端位置(世界): {ee_pos}")
                     except Exception as e:
                         print(f"   ⚠️ 无法获取末端位置: {e}")
                 
@@ -1128,8 +836,7 @@ def step_once(
                 my_controller.saved_pick_position = picking_position.copy()
                 print(f"📍 保存抓取位置: {my_controller.saved_pick_position}")
                 try:
-                    # 使用控制器中保存的目标物体路径
-                    my_controller._attach_object(my_controller.target_object_path)
+                    my_controller._attach_object()
                     if not my_controller.is_attached:
                         print("⚠️ 物体附加失败，但继续执行任务")
                 except Exception as e:
@@ -1189,14 +896,10 @@ def step_once(
 # 只有直接运行时才执行主循环，被导入时跳过
 if __name__ == "__main__":
     try:
-        while step_once(
-            render=True,
-            pick_obj_path="/World/SaltShaker_3",
-            place_obj_path="/World/CuttingBoard_4"
-            ):
+        while step_once(render=True):
             pass
     finally:
         simulation_app.close()
 
 # 运行命令
-# /home/di-gua/isaac-sim/python.sh pick_place_localFranka_curobo_scipy_seed.py
+# /home/di-gua/isaac-sim/python.sh pick_place_localFranka_curobo_scipy_specified.py

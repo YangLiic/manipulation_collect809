@@ -21,24 +21,42 @@ import numpy as np
 
 CAPTURE_RESOLUTION = (1280, 960)
 CAMERA_KEYWORD = "Camera"
-DEFAULT_FPS = 5.0
+DEFAULT_FPS = 30.0
 DEPTH_MAX_METERS = 10.0
 DEPTH_SCALE_MM = 1000.0
 
 
 def _resolve_script_path(script: str) -> Path:
+    # 1. 尝试绝对路径或相对于当前工作目录的路径
     path = Path(script)
     if path.is_file():
         return path
     candidate = Path(f"{script}.py")
     if candidate.is_file():
         return candidate
-    raise FileNotFoundError(f"找不到脚本 {script} 或 {script}.py")
+        
+    # 2. 尝试相对于 collect_curobo.py 脚本所在目录的路径
+    collector_dir = Path(__file__).parent
+    path = collector_dir / script
+    if path.is_file():
+        return path
+    candidate = collector_dir / f"{script}.py"
+    if candidate.is_file():
+        return candidate
+        
+    raise FileNotFoundError(f"找不到脚本 {script} 或 {script}.py (搜索范围: CWD 和 {collector_dir})")
 
 
 def _load_module(script: str) -> ModuleType:
     module_path = _resolve_script_path(script)
     module_name = module_path.stem
+    
+    # 🔑 自动添加脚本所在目录到 sys.path，解决子脚本内部的相对导入问题
+    script_dir = str(module_path.parent.absolute())
+    if script_dir not in sys.path:
+        print(f"➕ 添加脚本目录到 sys.path: {script_dir}")
+        sys.path.insert(0, script_dir)
+        
     spec = importlib.util.spec_from_file_location(module_name, str(module_path))
     if spec is None or spec.loader is None:
         raise ImportError(f"无法加载模块: {module_name}")
@@ -958,7 +976,7 @@ def collect_from_module(
 
 def parse_args():
     p = argparse.ArgumentParser(description="异步 episode 数据采集（高频连拍）")
-    p.add_argument("--script", "-s", default="pick_place", help="任务脚本(不含 .py)")
+    p.add_argument("--script", "-s", default="scipy/collect_pick_place_seed", help="任务脚本(不含 .py)")
     p.add_argument("--out", "-o", default="./collect_output", help="输出根目录")
     p.add_argument("--fps", type=float, default=DEFAULT_FPS, help="采样频率 (Hz)")
 
