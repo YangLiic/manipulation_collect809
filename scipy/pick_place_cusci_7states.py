@@ -266,9 +266,36 @@ def configure_collection(
 # 固定放置位置
 fixed_spawn_pos = np.array([0.0, 0.5, -0.25], dtype=float)
 
+# 🔄 基座旋转配置：是否通过代码旋转基座（而不是修改USD）
+# 设置为 True 时，基座将顺时针旋转90度（从侧面朝向桌子变为正面朝向桌子）
+ENABLE_BASE_ROTATION = True  # 设置为 False 则不旋转
+BASE_ROTATION_DEGREES = -90.0  # 顺时针旋转90度（负值表示顺时针）
+
 FRANKA_LOCAL_USD = "Franka_usd/Franka.usd"
 FRANKA_REFERENCE_PATH = "/World/Franka"
 FRANKA_NESTED_PATH = "/World/Franka/franka"
+
+
+def _get_base_rotation_quaternion(rotation_degrees: float):
+    """
+    生成绕Z轴旋转的四元数（用于基座旋转）
+    
+    参数:
+        rotation_degrees: 旋转角度（度），负值表示顺时针
+        
+    返回:
+        四元数 (w, x, y, z) 格式
+    """
+    from scipy.spatial.transform import Rotation as R
+    
+    # 绕Z轴旋转（Z轴向上，从Z轴正方向看，负角度是顺时针）
+    rotation = R.from_euler('z', rotation_degrees, degrees=True)
+    quat_xyzw = rotation.as_quat()  # 返回 (x, y, z, w)
+    
+    # 转换为 (w, x, y, z) 格式（Isaac Sim 格式）
+    quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
+    
+    return quat_wxyz
 
 
 def _ensure_local_franka_loaded():
@@ -312,12 +339,40 @@ if Franka is None:
 if is_prim_path_valid(franka_prim_path):
     my_franka = Franka(prim_path=franka_prim_path, name="Franka")
     try:
-        my_franka.set_world_pose(position=fixed_spawn_pos)
+        # 🔄 如果启用了基座旋转，同时设置位置和旋转
+        if ENABLE_BASE_ROTATION:
+            base_rotation_quat = _get_base_rotation_quaternion(BASE_ROTATION_DEGREES)
+            print(f"🔄 通过代码旋转基座: {BASE_ROTATION_DEGREES}° (顺时针)")
+            print(f"   旋转四元数 (w, x, y, z): {base_rotation_quat}")
+            my_franka.set_world_pose(position=fixed_spawn_pos, orientation=base_rotation_quat)
+        else:
+            my_franka.set_world_pose(position=fixed_spawn_pos)
     except Exception:
-        XFormPrim(franka_prim_path).set_world_pose(position=fixed_spawn_pos)
+        # 备用方法：使用 XFormPrim
+        if ENABLE_BASE_ROTATION:
+            base_rotation_quat = _get_base_rotation_quaternion(BASE_ROTATION_DEGREES)
+            print(f"🔄 通过代码旋转基座（备用方法）: {BASE_ROTATION_DEGREES}°")
+            XFormPrim(franka_prim_path).set_world_pose(
+                position=fixed_spawn_pos, 
+                orientation=base_rotation_quat
+            )
+        else:
+            XFormPrim(franka_prim_path).set_world_pose(position=fixed_spawn_pos)
     simulation_app.update()
 else:
+    # 创建时设置位置（如果需要旋转，后续再设置）
     my_franka = Franka(prim_path=franka_prim_path, name="Franka", position=fixed_spawn_pos)
+    if ENABLE_BASE_ROTATION:
+        base_rotation_quat = _get_base_rotation_quaternion(BASE_ROTATION_DEGREES)
+        print(f"🔄 通过代码旋转基座（创建后）: {BASE_ROTATION_DEGREES}°")
+        try:
+            my_franka.set_world_pose(position=fixed_spawn_pos, orientation=base_rotation_quat)
+        except Exception:
+            XFormPrim(franka_prim_path).set_world_pose(
+                position=fixed_spawn_pos, 
+                orientation=base_rotation_quat
+            )
+        simulation_app.update()
 
 my_world.scene.add(my_franka)
 my_world.reset()
@@ -360,13 +415,29 @@ class CuroboPickPlaceController:
         # 这个偏移量补偿了从 panda_hand 到指尖的 Z 轴距离
         self.tcp_z_offset = 0.058  # 约 5.8cm
         
-        # 获取机器人基座的世界位置
+        # 获取机器人基座的世界位置和姿态（包括代码设置的旋转）
         robot_base_prim = XFormPrim(franka_prim_path)
         positions, orientations = robot_base_prim.get_world_poses()
         self.robot_base_position = positions[0]  # 取第一个元素
         self.robot_base_orientation = orientations[0]
         print(f"🤖 机器人基座世界位置: {self.robot_base_position}")
-        print(f"🤖 机器人基座世界姿态: {self.robot_base_orientation}")
+        print(f"🤖 机器人基座世界姿态 (w, x, y, z): {self.robot_base_orientation}")
+        
+        # 🔍 验证基座旋转角度（帮助调试）
+        from scipy.spatial.transform import Rotation as R
+        base_quat_xyzw = np.array([
+            self.robot_base_orientation[1], 
+            self.robot_base_orientation[2], 
+            self.robot_base_orientation[3], 
+            self.robot_base_orientation[0]
+        ])
+        base_rotation = R.from_quat(base_quat_xyzw)
+        base_euler = base_rotation.as_euler('xyz', degrees=True)
+        print(f"🔍 基座旋转角度 (Euler XYZ, 度): {base_euler}")
+        if np.allclose(base_euler, [0, 0, 0], atol=1.0):
+            print(f"   ✅ 基座未旋转（或旋转很小），坐标系对齐")
+        else:
+            print(f"   ⚠️ 基座已旋转，坐标变换将自动处理")
         
         # 控制关节
         self.cmd_js_names = [
@@ -628,12 +699,24 @@ class CuroboPickPlaceController:
         print(f"   平移后位置: {pos_translated}")
         print(f"   旋转后位置（相对基座）: {pos_relative}")
         
+        # 🔑 关键修复：姿态也需要从世界坐标系变换到基座坐标系
+        # 将世界坐标系中的姿态四元数转换为基座坐标系中的姿态
+        # quat_world 是 (w, x, y, z) 格式
+        quat_world_xyzw = np.array([quat_world[1], quat_world[2], quat_world[3], quat_world[0]])  # 转换为 (x, y, z, w)
+        world_rotation = R.from_quat(quat_world_xyzw)
+        
+        # 组合旋转：基座逆旋转 * 世界姿态 = 基座坐标系中的姿态
+        relative_rotation = base_rotation_inv * world_rotation
+        quat_relative_xyzw = relative_rotation.as_quat()  # 返回 (x, y, z, w)
+        quat_relative = np.array([quat_relative_xyzw[3], quat_relative_xyzw[0], quat_relative_xyzw[1], quat_relative_xyzw[2]])  # 转换回 (w, x, y, z)
+        
         # 使用相对坐标
         pos = pos_relative
-        quat = quat_world
+        quat = quat_relative
         
         print(f"   传入 CuRobo 的位置: {pos}")
-        print(f"   传入 CuRobo 的姿态: {quat}")
+        print(f"   传入 CuRobo 的姿态（世界坐标系）: {quat_world}")
+        print(f"   传入 CuRobo 的姿态（基座坐标系）: {quat}")
         
         ik_goal = Pose(
             position=self.tensor_args.to_device(pos),
@@ -878,7 +961,7 @@ def step_once(
     use_seed_model: bool = None,
     seed_image_path: str = None,
     seed_object_name: str = None,
-    grasp_z_rotation: float = 90,
+    grasp_z_rotation: float = 0.0,
     grasp_tilt_x: float = 0.0,
     grasp_tilt_y: float = 0.0,
     render: bool = None
