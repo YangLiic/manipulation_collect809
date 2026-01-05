@@ -478,7 +478,7 @@ class CuroboPickPlaceController:
             robot_cfg,
             self._world_cfg,
             self.tensor_args,
-            trajopt_tsteps=48,  # 增加优化步数，生成更平滑的轨迹
+            trajopt_tsteps=32,  # 增加优化步数，生成更平滑的轨迹
             collision_checker_type=CollisionCheckerType.MESH,
             use_cuda_graph=True,
             interpolation_dt=0.03,  # 30ms 时间步长，降低控制频率，减少抖动
@@ -486,8 +486,8 @@ class CuroboPickPlaceController:
             collision_activation_distance=0.02,  # 增加容忍度
             # 添加平滑参数
             smooth_weight=[100.0, 50.0, 10.0],  # 位置、速度、加速度平滑权重
-            # velocity_scale=0.75,  # 降低速度，增加稳定性
-            # acceleration_scale=0.75,  # 降低加速度，减少抖动
+            velocity_scale=0.75,  # 降低速度，增加稳定性
+            acceleration_scale=0.75,  # 降低加速度，减少抖动
         )
         
         self.motion_gen = MotionGen(motion_gen_config)
