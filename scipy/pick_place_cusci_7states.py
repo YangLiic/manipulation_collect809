@@ -178,7 +178,11 @@ open_stage("/home/di-gua/licheng/manipulation/Collected_World1/World0.usd")
 simulation_app.update()
 
 # 创建 World
-my_world = World(stage_units_in_meters=1.0)
+my_world = World(
+    stage_units_in_meters=1.0,
+    physics_dt=1.0/60.0,  # 60 Hz 物理仿真
+    rendering_dt=1.0/60.0,  # 60 Hz 渲染
+)
 
 # 对象引用已移至 step_once 函数参数中
 
@@ -413,7 +417,8 @@ class CuroboPickPlaceController:
         # TCP 偏移补偿：panda_hand 到夹爪指尖的距离
         # CuRobo 使用 panda_hand 作为 ee_link，但实际接触点在指尖
         # 这个偏移量补偿了从 panda_hand 到指尖的 Z 轴距离
-        self.tcp_z_offset = 0.058  # 约 5.8cm
+        # 注意：根据实际测试调整，考虑夹爪闭合后的实际接触点
+        self.tcp_z_offset = 0.11
         
         # 获取机器人基座的世界位置和姿态（包括代码设置的旋转）
         robot_base_prim = XFormPrim(franka_prim_path)
@@ -473,12 +478,16 @@ class CuroboPickPlaceController:
             robot_cfg,
             self._world_cfg,
             self.tensor_args,
-            trajopt_tsteps=32,
+            trajopt_tsteps=48,  # 增加优化步数，生成更平滑的轨迹
             collision_checker_type=CollisionCheckerType.MESH,
             use_cuda_graph=True,
-            interpolation_dt=0.02,  # 增大时间步长，降低执行速度，减少晃动
+            interpolation_dt=0.03,  # 30ms 时间步长，降低控制频率，减少抖动
             collision_cache={"obb": 50, "mesh": 30},
             collision_activation_distance=0.02,  # 增加容忍度
+            # 添加平滑参数
+            smooth_weight=[100.0, 50.0, 10.0],  # 位置、速度、加速度平滑权重
+            # velocity_scale=0.75,  # 降低速度，增加稳定性
+            # acceleration_scale=0.75,  # 降低加速度，减少抖动
         )
         
         self.motion_gen = MotionGen(motion_gen_config)
@@ -518,6 +527,7 @@ class CuroboPickPlaceController:
         # 🎯 随机抓取姿态生成器
         self.use_random_grasp = True  # 启用随机抓取姿态
         self.current_grasp_quat = None  # 当前生成的抓取姿态
+        self.current_place_quat = None  # 当前生成的放置姿态
         
         # 🎯 目标物体路径（用于动态附着）
         self.target_object_path = None  # 将由 step_once 设置
@@ -629,38 +639,69 @@ class CuroboPickPlaceController:
         return self._execute_trajectory()
     
     def _get_target_pose(self, picking_position, placing_position, offset):
-        """根据当前事件获取目标位姿（支持随机抓取姿态）"""
-        # 🎯 使用随机生成的抓取姿态（如果可用），否则使用默认朝下姿态
-        if self.current_grasp_quat is not None:
-            ee_quat = self.current_grasp_quat
-        else:
-            # 默认：末端朝下的四元数 [w, x, y, z] - 180度绕X轴旋转
-            ee_quat = np.array([0.0, 1.0, 0.0, 0.0])  # 朝下 (w, x, y, z)
+        """根据当前事件获取目标位姿（支持随机抓取和放置姿态）
+        
+        关键修复：当夹爪倾斜时，需要反向补偿位置，确保夹爪末端（而非 panda_hand）到达目标点
+        """
+        from scipy.spatial.transform import Rotation as R
+        
+        # 🎯 根据当前事件选择使用抓取姿态还是放置姿态
+        if self.current_event in [0, 1, 2]:  # Event 0-2: 使用抓取姿态
+            if self.current_grasp_quat is not None:
+                ee_quat = self.current_grasp_quat
+            else:
+                # 默认：末端朝下的四元数 [w, x, y, z]
+                ee_quat = np.array([0.0, 1.0, 0.0, 0.0])
+        else:  # Event 3-6: 使用放置姿态
+            if self.current_place_quat is not None:
+                ee_quat = self.current_place_quat
+            else:
+                # 默认：末端朝下的四元数 [w, x, y, z]
+                ee_quat = np.array([0.0, 1.0, 0.0, 0.0])
+        
+        tcp_offset_local = np.array([0.0, 0.0, -self.tcp_z_offset])
+        
+        quat_xyzw = np.array([ee_quat[1], ee_quat[2], ee_quat[3], ee_quat[0]])
+        rotation = R.from_quat(quat_xyzw)
+
+        tcp_offset_world = rotation.apply(tcp_offset_local)
+
+        # 调试输出（仅在事件切换时打印）
+        if self.current_event in [0, 1, 3, 4, 6] and self.cmd_plan is None:
+            print(f"🔧 TCP 偏移补偿 (Event {self.current_event}):")
+            print(f"   局部偏移 (panda_hand坐标系): {tcp_offset_local}")
+            print(f"   姿态四元数 (wxyz): {ee_quat}")
+            print(f"   旋转后世界偏移: {tcp_offset_world}")
         
         if self.current_event == 0:  # 接近抓取
-            pos = picking_position + np.array([0, 0, self.approach_height + self.tcp_z_offset]) + offset
+            # panda_hand 目标位置 = 抓取点 + 接近高度 - TCP偏移（反向补偿）
+            pos = picking_position + np.array([0, 0, self.approach_height]) + tcp_offset_world + offset
             return (pos, ee_quat)
         elif self.current_event == 1:  # 下降抓取
-            pos = picking_position + np.array([0, 0, self.tcp_z_offset]) + offset
+            # panda_hand 目标位置 = 抓取点 - TCP偏移（反向补偿）
+            pos = picking_position + tcp_offset_world + offset
             return (pos, ee_quat)
         elif self.current_event == 2:  # 抓取（夹爪控制移到主循环）
             return None  # 不规划，等待夹爪闭合
         elif self.current_event == 3:  # 附着物体并直接移动到接近放置位置
             if not self.is_attached and self.target_object_path:
                 self._attach_object(self.target_object_path)
-            # 附着后直接移动到放置位置上方，不再先提升
-            pos = placing_position + np.array([0, 0, self.approach_height + self.tcp_z_offset]) + offset
+            # 附着后直接移动到放置位置上方
+            pos = placing_position + np.array([0, 0, self.approach_height]) + tcp_offset_world + offset
             return (pos, ee_quat)
         elif self.current_event == 4:  # 下降放置
-            pos = placing_position + np.array([0, 0, self.tcp_z_offset]) + offset
+            # panda_hand 目标位置 = 放置点 - TCP偏移（反向补偿）
+            pos = placing_position + tcp_offset_world + offset
             return (pos, ee_quat)
         elif self.current_event == 5:  # 放置（夹爪控制移到主循环）
             return None  # 不规划，等待夹爪打开
         elif self.current_event == 6:  # 分离物体并后退
             if self.is_attached:
                 self._detach_object()
-            pos = placing_position + np.array([0, 0, self.lift_height + self.tcp_z_offset]) + offset
+            # 后退时也需要补偿
+            pos = placing_position + np.array([0, 0, self.lift_height]) + tcp_offset_world + offset
             return (pos, ee_quat)
+            return (pos, ee_quat)   
         else:  # Event 7+: 完成
             return None
     
@@ -758,8 +799,8 @@ class CuroboPickPlaceController:
         if self.cmd_plan is None:
             return None  # 等待主循环切换事件
         
-        # 每3步发送一次指令
-        if self._step_idx % 3 == 0:
+        # 每2步发送一次指令（与 interpolation_dt=0.03 配合，约 60Hz 控制频率）
+        if self._step_idx % 2 == 0:
             cmd_state = self.cmd_plan[self.cmd_idx]
             self.cmd_idx += 1
             
@@ -794,9 +835,10 @@ class CuroboPickPlaceController:
                 )
             else:
                 # Event 0-2, 5-6: 只控制手臂关节
+                # 🔑 保留速度信息，使用 CuRobo 规划的速度而不是清零
                 art_action = ArticulationAction(
                     cmd_state.position.cpu().numpy(),
-                    cmd_state.velocity.cpu().numpy() * 0.0,
+                    cmd_state.velocity.cpu().numpy(),  # 保留规划速度，提升平滑度
                     joint_indices=self.idx_list,
                 )
             
@@ -902,6 +944,7 @@ class CuroboPickPlaceController:
         self.wait_counter = 0
         self.plan_fail_counter = 0
         self.current_grasp_quat = None  # 重置抓取姿态
+        self.current_place_quat = None  # 重置放置姿态
         if self.is_attached:
             self._detach_object()
     
@@ -963,7 +1006,10 @@ def step_once(
     seed_object_name: str = None,
     grasp_z_rotation: float = 0.0,
     grasp_tilt_x: float = 0.0,
-    grasp_tilt_y: float = 0.0,
+    grasp_tilt_y: float = -30.0,
+    place_z_rotation: float = 0.0,
+    place_tilt_x: float = 0.0,
+    place_tilt_y: float = -30.0,
     render: bool = None
 ) -> bool:
     """
@@ -979,9 +1025,12 @@ def step_once(
         use_seed_model: 是否使用 Seed 模型估计抓取姿态
         seed_image_path: Seed 模型输入图像路径
         seed_object_name: 要抓取的物体名称（用于 Seed 模型 prompt）
-        grasp_z_rotation: 手动指定的 Z 轴旋转角度（度）
-        grasp_tilt_x: 手动指定的 X 轴倾斜角度（度）
-        grasp_tilt_y: 手动指定的 Y 轴倾斜角度（度）
+        grasp_z_rotation: 手动指定的抓取 Z 轴旋转角度（度）
+        grasp_tilt_x: 手动指定的抓取 X 轴倾斜角度（度）
+        grasp_tilt_y: 手动指定的抓取 Y 轴倾斜角度（度）
+        place_z_rotation: 手动指定的放置 Z 轴旋转角度（度）
+        place_tilt_x: 手动指定的放置 X 轴倾斜角度（度）
+        place_tilt_y: 手动指定的放置 Y 轴倾斜角度（度）
         render: 是否渲染
         
     返回:
@@ -1017,7 +1066,7 @@ def step_once(
     
     # 设置默认偏移
     if eef_lateral_offset is None:
-        eef_lateral_offset = np.array([0.0, 0.0, 0.052])
+        eef_lateral_offset = np.array([0.0, 0.0, 0.0])
 
     if not simulation_app.is_running():
         return False
@@ -1140,7 +1189,19 @@ def step_once(
                 print(f"🎯 最终抓取姿态:")
                 print(f"   输入参数: Z={z_rot}°, X={tilt_x}°, Y={tilt_y}°")
                 print(f"   四元数: {my_controller.current_grasp_quat}")
-                print(f"   欧拉角 [roll, pitch, yaw]: [{euler[0]:.1f}°, {euler[1]:.1f}°, {euler[2]:.1f}°]\n")
+                print(f"   欧拉角 [roll, pitch, yaw]: [{euler[0]:.1f}°, {euler[1]:.1f}°, {euler[2]:.1f}°]")
+                
+                # 🎯 生成放置姿态四元数（使用手动参数）
+                my_controller.current_place_quat = generate_grasp_pose(
+                    z_rotation=place_z_rotation,
+                    tilt_x=place_tilt_x,
+                    tilt_y=place_tilt_y
+                )
+                place_euler = quaternion_to_euler(my_controller.current_place_quat, degrees=True)
+                print(f"🎯 最终放置姿态:")
+                print(f"   输入参数: Z={place_z_rotation}°, X={place_tilt_x}°, Y={place_tilt_y}°")
+                print(f"   四元数: {my_controller.current_place_quat}")
+                print(f"   欧拉角 [roll, pitch, yaw]: [{place_euler[0]:.1f}°, {place_euler[1]:.1f}°, {place_euler[2]:.1f}°]\n")
 
         current_joint_positions = my_franka.get_joint_positions()
         current_event = my_controller.get_current_event()
@@ -1337,4 +1398,4 @@ if __name__ == "__main__":
         simulation_app.close()
 
 # 运行命令
-# /home/di-gua/isaac-sim/python.sh scipy/pick_place_localFranka_curobo_scipy_seed.py
+# /home/di-gua/isaac-sim/python.sh scipy/pick_place_cusci_7states.py

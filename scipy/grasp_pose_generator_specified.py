@@ -46,9 +46,7 @@ def generate_grasp_pose(
     ])  # scipy 使用 [x, y, z, w] 格式
     
     # 生成指定的 Z 轴旋转
-    # 注意：反转方向，使正值为顺时针（原本 scipy 正值为逆时针）
-    actual_z_angle = -z_rotation 
-    z_rot = R.from_euler('z', actual_z_angle, degrees=True)
+    z_rot = R.from_euler('z', z_rotation, degrees=True)
     
     # 生成指定的 X/Y 轴倾斜
     tilt_rot = R.from_euler('xy', [tilt_x, tilt_y], degrees=True)
