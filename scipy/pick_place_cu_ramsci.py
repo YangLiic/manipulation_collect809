@@ -1146,6 +1146,25 @@ def step_once(
             if my_controller.use_random_grasp:
                 global _seed_grasp_params_cache
                 
+                # 🎲 添加随机偏移到姿态参数（-10~+10度）
+                random_offset_range = 10.0  # 度
+                grasp_z_rotation_random = grasp_z_rotation + np.random.uniform(-random_offset_range, random_offset_range)
+                grasp_tilt_x_random = grasp_tilt_x + np.random.uniform(-random_offset_range, random_offset_range)
+                grasp_tilt_y_random = grasp_tilt_y + np.random.uniform(-random_offset_range, random_offset_range)
+                
+                place_z_rotation_random = place_z_rotation + np.random.uniform(-random_offset_range, random_offset_range)
+                place_tilt_x_random = place_tilt_x + np.random.uniform(-random_offset_range, random_offset_range)
+                place_tilt_y_random = place_tilt_y + np.random.uniform(-random_offset_range, random_offset_range)
+                
+                print(f"🎲 抓取姿态（基础 + 随机偏移）:")
+                print(f"   Z旋转: {grasp_z_rotation:.1f}° + {grasp_z_rotation_random - grasp_z_rotation:.1f}° = {grasp_z_rotation_random:.1f}°")
+                print(f"   X倾斜: {grasp_tilt_x:.1f}° + {grasp_tilt_x_random - grasp_tilt_x:.1f}° = {grasp_tilt_x_random:.1f}°")
+                print(f"   Y倾斜: {grasp_tilt_y:.1f}° + {grasp_tilt_y_random - grasp_tilt_y:.1f}° = {grasp_tilt_y_random:.1f}°")
+                print(f"🎲 放置姿态（基础 + 随机偏移）:")
+                print(f"   Z旋转: {place_z_rotation:.1f}° + {place_z_rotation_random - place_z_rotation:.1f}° = {place_z_rotation_random:.1f}°")
+                print(f"   X倾斜: {place_tilt_x:.1f}° + {place_tilt_x_random - place_tilt_x:.1f}° = {place_tilt_x_random:.1f}°")
+                print(f"   Y倾斜: {place_tilt_y:.1f}° + {place_tilt_y_random - place_tilt_y:.1f}° = {place_tilt_y_random:.1f}°")
+                
                 # 决定使用 Seed 模型还是手动参数
                 if use_seed_model:
                     # 检查是否有缓存
@@ -1176,8 +1195,8 @@ def step_once(
                             z_rot, tilt_x, tilt_y = grasp_z_rotation, grasp_tilt_x, grasp_tilt_y
                             print("="*70 + "\n")
                 else:
-                    print("\n📝 使用手动指定的抓取姿态参数")
-                    z_rot, tilt_x, tilt_y = grasp_z_rotation, grasp_tilt_x, grasp_tilt_y
+                    print("\n📝 使用手动指定的抓取姿态参数（带随机偏移）")
+                    z_rot, tilt_x, tilt_y = grasp_z_rotation_random, grasp_tilt_x_random, grasp_tilt_y_random
                 
                 # 生成抓取姿态四元数
                 my_controller.current_grasp_quat = generate_grasp_pose(
@@ -1191,15 +1210,15 @@ def step_once(
                 print(f"   四元数: {my_controller.current_grasp_quat}")
                 print(f"   欧拉角 [roll, pitch, yaw]: [{euler[0]:.1f}°, {euler[1]:.1f}°, {euler[2]:.1f}°]")
                 
-                # 🎯 生成放置姿态四元数（使用手动参数）
+                # 🎯 生成放置姿态四元数（使用带随机偏移的参数）
                 my_controller.current_place_quat = generate_grasp_pose(
-                    z_rotation=place_z_rotation,
+                    z_rotation=z_rot,
                     tilt_x=tilt_x,
                     tilt_y=tilt_y
                 )
                 place_euler = quaternion_to_euler(my_controller.current_place_quat, degrees=True)
                 print(f"🎯 最终放置姿态:")
-                print(f"   输入参数: Z={place_z_rotation}°, X={place_tilt_x}°, Y={place_tilt_y}°")
+                print(f"   输入参数: Z={place_z_rotation_random}°, X={place_tilt_x_random}°, Y={place_tilt_y_random}°")
                 print(f"   四元数: {my_controller.current_place_quat}")
                 print(f"   欧拉角 [roll, pitch, yaw]: [{place_euler[0]:.1f}°, {place_euler[1]:.1f}°, {place_euler[2]:.1f}°]\n")
 

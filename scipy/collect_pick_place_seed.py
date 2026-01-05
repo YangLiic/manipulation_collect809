@@ -22,7 +22,7 @@
 
 # 导入主模块（这会初始化 IsaacSim 环境）
 #from pick_place_localFranka_curobo_scipy_seed import *
-from pick_place_cusci_7states import *
+from pick_place_cu_ramsci import *
 
 # ============================================================
 # 配置数据采集参数

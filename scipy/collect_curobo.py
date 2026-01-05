@@ -26,6 +26,21 @@ DEPTH_MAX_METERS = 10.0
 DEPTH_SCALE_MM = 1000.0
 
 
+class NumpyJSONEncoder(json.JSONEncoder):
+    """支持 NumPy 类型的 JSON encoder"""
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.int8, np.int16, np.int32, np.int64,
+                           np.uint8, np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float16, np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        return super().default(obj)
+
+
 def _resolve_script_path(script: str) -> Path:
     # 1. 尝试绝对路径或相对于当前工作目录的路径
     path = Path(script)
@@ -337,6 +352,7 @@ class AsyncEpisodeDatasetWriter:
         self.camera_dir_mode = str(camera_dir_mode or "short")
         drop_str = str(camera_dir_drop_tokens or "World,Franka,base_link")
         self.camera_dir_drop_tokens = [t.strip() for t in drop_str.split(",") if t.strip()]
+        self._writer_workers = max(1, int(writer_workers))  # 保存以便重建 executor
 
         self._queue: Queue = Queue(maxsize=max(1, int(queue_size)))
         self._stop = False
@@ -355,7 +371,7 @@ class AsyncEpisodeDatasetWriter:
         self._episode_start_t = None
         self._episode_end_t = None
 
-        self._executor = ThreadPoolExecutor(max_workers=max(1, int(writer_workers)))
+        self._executor = ThreadPoolExecutor(max_workers=self._writer_workers)
         self._worker = Thread(target=self._process_queue, daemon=True)
         self._worker.start()
 
@@ -411,7 +427,7 @@ class AsyncEpisodeDatasetWriter:
         self.json_path = self.episode_dir / "data.json"
         with open(self.json_path, "w", encoding="utf-8") as f:
             f.write("{\n")
-            f.write('"info": ' + json.dumps(info, ensure_ascii=False, indent=2) + ",\n")
+            f.write('"info": ' + json.dumps(info, ensure_ascii=False, indent=2, cls=NumpyJSONEncoder) + ",\n")
             f.write('"data": [\n')
 
         # Timeline log (idx,t) for visualization/debug.
@@ -477,8 +493,10 @@ class AsyncEpisodeDatasetWriter:
             if item is not None:
                 try:
                     self._process_item(item)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[AsyncWriter] ⚠️ 处理帧失败: {e}")
+                    import traceback
+                    traceback.print_exc()
                 self._queue.task_done()
 
             if self._need_save and self._queue.empty() and self._episode_open:
@@ -629,15 +647,21 @@ class AsyncEpisodeDatasetWriter:
         item_to_write["colors"] = rel_colors
         item_to_write["depths"] = rel_depths
 
+        # 🔑 先增加计数（图片已提交写盘），再写 JSON metadata
+        self._processed += 1
+
         with open(self.json_path, "a", encoding="utf-8") as f:
             if not self._first_item:
                 f.write(",\n")
-            f.write(json.dumps(item_to_write, ensure_ascii=False))
+            f.write(json.dumps(item_to_write, ensure_ascii=False, cls=NumpyJSONEncoder))
             self._first_item = False
 
-        self._processed += 1
-
     def _finalize_episode(self):
+        # 🔑 等待所有写盘任务完成
+        self._executor.shutdown(wait=True)
+        # 重新创建 executor 供下一个 episode 使用
+        self._executor = ThreadPoolExecutor(max_workers=self._writer_workers)
+        
         with open(self.json_path, "a", encoding="utf-8") as f:
             f.write("\n]\n}")
 
@@ -870,6 +894,7 @@ def collect_from_module(
     timestamp_log: str,
     camera_dir_mode: str,
     camera_dir_drop_tokens: str,
+    num_episodes: int = 1,
 ):
     os.environ["ISAACSIM_HEADLESS"] = "1" if headless else "0"
 
@@ -907,14 +932,16 @@ def collect_from_module(
     stop_hook = getattr(module, "collect_should_stop_capture", None)
 
     capturing_active = False
-    terminate_after_cycle = False
+    completed_episodes = 0  # 已完成的 episode 计数
+
+    print(f"\n📊 多 Episode 采集模式: 目标 {num_episodes} 个 episodes")
+    print(f"   每个 episode 将使用不同的随机抓取姿态")
+    print(f"   进度: 0/{num_episodes}\n")
 
     try:
         while simulation_app.is_running():
             step_result = _call_step_function(step_fn)
-            if step_result is False:
-                break
-
+            
             physics_dt = _safe_get_physics_dt(my_world)
             
             # 检测是否正在进行 CuRobo 规划（规划期间不采集）
@@ -931,6 +958,10 @@ def collect_from_module(
             should_start = False
             should_stop = False
 
+            # 🔑 step_once 返回 False 表示任务完成
+            if step_result is False and capturing_active:
+                should_stop = True
+            
             if callable(start_hook) or callable(stop_hook):
                 if callable(start_hook) and not capturing_active:
                     should_start = bool(start_hook())
@@ -951,9 +982,48 @@ def collect_from_module(
                 collector.end_episode()
                 capturing_active = False
                 collector.reset_capture_timer()
-                if exit_on_complete:
-                    terminate_after_cycle = True
-                    break
+                completed_episodes += 1
+                
+                print(f"\n✅ Episode {completed_episodes}/{num_episodes} 完成，等待写盘...")
+                
+                # 🔑 等待写盘完成（重要！）
+                max_wait = 30  # 最多等待 30 秒
+                wait_start = time.time()
+                while not collector.writer.is_ready() and (time.time() - wait_start) < max_wait:
+                    time.sleep(0.1)
+                
+                if collector.writer.is_ready():
+                    print(f"✅ Episode {completed_episodes} 写盘完成")
+                else:
+                    print(f"⚠️ Episode {completed_episodes} 写盘超时（可能仍在后台处理）")
+                
+                # 检查是否完成所有 episodes
+                if completed_episodes >= num_episodes:
+                    print(f"\n🎉 所有 {num_episodes} 个 episodes 采集完成！")
+                    # 外层循环会检查 completed_episodes >= num_episodes 退出
+                    continue
+                
+                # 还有更多 episodes，重置控制器和任务
+                print(f"\n🔄 准备下一个 episode ({completed_episodes + 1}/{num_episodes})...")
+                print(f"   重置控制器，生成新的随机抓取姿态\n")
+                
+                # 重置控制器
+                if controller is not None and hasattr(controller, "reset"):
+                    controller.reset()
+                
+                # 重置世界（可选，根据需要）
+                if my_world is not None and hasattr(my_world, "reset"):
+                    try:
+                        my_world.reset()
+                    except Exception as e:
+                        print(f"⚠️ 世界重置失败: {e}")
+                
+                # 清除随机姿态缓存，让下一个 episode 生成新姿态
+                if hasattr(module, "_seed_grasp_params_cache"):
+                    module._seed_grasp_params_cache = None
+                if hasattr(module, "_height_offset_calculated"):
+                    module._height_offset_calculated = False
+                
                 continue
 
             if not capturing_active:
@@ -966,7 +1036,8 @@ def collect_from_module(
 
             collector.capture_if_needed()
 
-            if terminate_after_cycle:
+            # 🔑 所有 episodes 完成后退出
+            if completed_episodes >= num_episodes:
                 break
 
     finally:
@@ -1022,6 +1093,8 @@ def parse_args():
     exit_group.add_argument("--keep-alive", dest="exit_on_complete", action="store_false")
     p.set_defaults(exit_on_complete=True)
 
+    p.add_argument("--num-episodes", type=int, default=1, help="连续采集的 episode 数量（默认 1）")
+
     return p.parse_args()
 
 
@@ -1076,6 +1149,7 @@ if __name__ == "__main__":
         timestamp_log=args.timestamp_log,
         camera_dir_mode=args.camera_dir_mode,
         camera_dir_drop_tokens=args.camera_dir_drop_tokens,
+        num_episodes=args.num_episodes,
     )
 
 
