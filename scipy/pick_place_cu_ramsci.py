@@ -1607,6 +1607,14 @@ def step_once(
             # 🔑 区分单独运行和采集模式
             # - 单独运行（__name__ == "__main__"）：保持运行，不退出
             # - 采集模式（被 collect_curobo.py 导入）：返回 False 退出
+
+            # ✅ 采集模式：立即退出（避免额外录制很多帧导致 episode1 与后续 episode 行为不一致）
+            if __name__ != "__main__":
+                if not hasattr(my_controller, "_completion_printed"):
+                    my_controller._completion_printed = True
+                    print("\n🎉 任务完成！\n")
+                print("📊 采集模式：任务完成，准备退出...")
+                return False
             
             if not hasattr(my_controller, '_completion_steps'):
                 my_controller._completion_steps = 0
@@ -1622,14 +1630,9 @@ def step_once(
                 # 🔑 关键：检查是否为采集模式
                 # 如果是被导入的（采集模式），返回 False 退出
                 # 如果是直接运行，继续返回 True 保持运行
-                if __name__ != "__main__":
-                    # 采集模式：返回 False 让 collect_curobo.py 退出
-                    print("📊 采集模式：任务完成，准备退出...")
-                    return False
-                else:
-                    # 单独运行模式：保持运行
-                    my_world.step(render=render if render is not None else True)
-                    return True
+                # 单独运行模式：保持运行
+                my_world.step(render=render if render is not None else True)
+                return True
 
     return True
 
