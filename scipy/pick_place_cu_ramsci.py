@@ -100,6 +100,144 @@ def get_object_bounding_box(prim_path: str):
     
     return None
 
+def check_object_overlap(obj1_path: str, obj2_path: str, safety_margin: float = 0.05) -> bool:
+    """
+    检查两个物体的 bounding box 是否重叠（带安全边距）
+    
+    参数:
+        obj1_path: 第一个物体的 USD 路径
+        obj2_path: 第二个物体的 USD 路径
+        safety_margin: 安全边距（米），默认 5cm
+        
+    返回:
+        True 表示重叠（碰撞），False 表示安全
+    """
+    bbox1 = get_object_bounding_box(obj1_path)
+    bbox2 = get_object_bounding_box(obj2_path)
+    
+    if bbox1 is None or bbox2 is None:
+        # 无法获取 bounding box，保守地认为不碰撞
+        return False
+    
+    min1, max1 = bbox1
+    min2, max2 = bbox2
+    
+    # 扩展 bounding box（添加安全边距）
+    min1_expanded = min1 - safety_margin
+    max1_expanded = max1 + safety_margin
+    
+    # 检查是否重叠（AABB 碰撞检测）
+    overlap_x = max1_expanded[0] >= min2[0] and min1_expanded[0] <= max2[0]
+    overlap_y = max1_expanded[1] >= min2[1] and min1_expanded[1] <= max2[1]
+    overlap_z = max1_expanded[2] >= min2[2] and min1_expanded[2] <= max2[2]
+    
+    return overlap_x and overlap_y and overlap_z
+
+
+def randomize_object_position(
+    obj_path: str,
+    original_pos: np.ndarray,
+    offset_range: float = 0.1,
+    max_attempts: int = 100,
+    scene_objects: list = None,
+    safety_margin: float = 0.05,
+    table_path: str = "/World/Table_1",
+    table_margin: float = 0.05
+) -> np.ndarray:
+    """
+    随机偏移物体位置（仅 X-Y 平面），并检查碰撞
+    
+    参数:
+        obj_path: 要移动的物体的 USD 路径
+        original_pos: 物体的原始位置（世界坐标）
+        offset_range: 偏移范围（米），默认 ±0.1m
+        max_attempts: 最大尝试次数，默认 10 次
+        scene_objects: 场景中其他物体的路径列表（用于碰撞检测）
+        safety_margin: 碰撞检测安全边距（米）
+        table_path: 桌子的 USD 路径
+        table_margin: 距离桌子边缘的安全距离（米），默认 0.1m
+        
+    返回:
+        新位置（如果找到安全位置），否则返回原始位置
+    """
+    try:
+        # 获取桌子的 bounding box
+        table_bbox = get_object_bounding_box(table_path)
+        if table_bbox is None:
+            print(f"⚠️ 无法获取桌子边界，跳过桌面检查")
+            table_min, table_max = None, None
+        else:
+            table_min, table_max = table_bbox
+            print(f"📐 桌面边界: X [{table_min[0]:.3f}, {table_max[0]:.3f}], Y [{table_min[1]:.3f}, {table_max[1]:.3f}]")
+        
+        # 使用 USD API 直接设置位置
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(obj_path)
+        if not prim.IsValid():
+            print(f"⚠️ 无效的 prim 路径: {obj_path}")
+            return original_pos
+        
+        xform = UsdGeom.Xformable(prim)
+        
+        # 获取或创建 translate 操作（不重复添加）
+        xform_ops = xform.GetOrderedXformOps()
+        translate_op = None
+        for op in xform_ops:
+            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                translate_op = op
+                break
+        
+        if translate_op is None:
+            translate_op = xform.AddTranslateOp()
+        
+        for attempt in range(max_attempts):
+            # 生成随机偏移（仅 X-Y）
+            offset_x = np.random.uniform(-offset_range, offset_range)
+            offset_y = np.random.uniform(-offset_range, offset_range)
+            new_pos = original_pos + np.array([offset_x, offset_y, 0.0])
+            
+            # 检查是否在桌面范围内（带边距）
+            if table_min is not None and table_max is not None:
+                if (new_pos[0] < table_min[0] + table_margin or 
+                    new_pos[0] > table_max[0] - table_margin or
+                    new_pos[1] < table_min[1] + table_margin or 
+                    new_pos[1] > table_max[1] - table_margin):
+                    print(f"   ⚠️ 尝试 {attempt + 1}/{max_attempts} 超出桌面范围，重新生成...")
+                    continue
+            
+            # 临时设置新位置（用于碰撞检测）
+            translate_op.Set(Gf.Vec3d(float(new_pos[0]), float(new_pos[1]), float(new_pos[2])))
+            
+            # 检查是否与其他物体碰撞
+            has_collision = False
+            if scene_objects:
+                for other_obj_path in scene_objects:
+                    if other_obj_path == obj_path:
+                        continue  # 跳过自己
+                    
+                    if check_object_overlap(obj_path, other_obj_path, safety_margin):
+                        has_collision = True
+                        break
+            
+            if not has_collision:
+                print(f"✅ 随机偏移成功 (尝试 {attempt + 1}/{max_attempts}):")
+                print(f"   原始位置: {original_pos}")
+                print(f"   新位置: {new_pos}")
+                print(f"   偏移量: [{offset_x:+.3f}, {offset_y:+.3f}, 0.000]m")
+                return new_pos
+            else:
+                print(f"   ⚠️ 尝试 {attempt + 1}/{max_attempts} 检测到碰撞，重新生成...")
+        
+        # 所有尝试都失败，恢复原始位置
+        print(f"❌ 随机偏移失败：{max_attempts} 次尝试均检测到碰撞或超出桌面，使用原始位置")
+        translate_op.Set(Gf.Vec3d(float(original_pos[0]), float(original_pos[1]), float(original_pos[2])))
+        return original_pos
+        
+    except Exception as e:
+        print(f"⚠️ 随机偏移异常: {e}，使用原始位置")
+        return original_pos
+
+
 def calculate_height_offset(
     pick_obj_path: str, 
     pick_pos: np.ndarray, 
@@ -133,7 +271,7 @@ def calculate_height_offset(
     pick_object_height = pick_object_top_z - pick_object_bottom_z
     
     # 计算抓取高度偏移
-    if pick_object_height <= 0.040:
+    if pick_object_height <= 0.04:
         pick_height_offset = 0.0
         print(f"🔧 自动计算抓取高度偏移:")
         print(f"   抓取物体中心 Z: {pick_pos[2]:.3f}m")
@@ -189,8 +327,8 @@ my_world = World(
 # ============================================================
 # 数据采集模式配置变量（供 collect_curobo.py 使用）
 # ============================================================
-_COLLECT_PICK_OBJ_PATH = "/World/SaltShaker_3"
-_COLLECT_PLACE_OBJ_PATH = "/World/CuttingBoard_4"
+_COLLECT_PICK_OBJ_PATH = "/World/Vegetable_9"
+_COLLECT_PLACE_OBJ_PATH = "/World/Bowl_0"
 _COLLECT_AUTO_HEIGHT_OFFSET = True
 _COLLECT_PICK_HEIGHT_OFFSET = 0.23
 _COLLECT_PLACING_HEIGHT_OFFSET = 0.23
@@ -201,6 +339,18 @@ _COLLECT_USE_SEED_MODEL = False
 _COLLECT_SEED_IMAGE_PATH = "/home/di-gua/data/seed-one-errors.png"
 _COLLECT_SEED_OBJECT_NAME = "bottle"
 _COLLECT_RENDER = True
+_COLLECT_RANDOMIZE_PICK_POSITION = True  # 是否随机化抓取物体位置
+_COLLECT_POSITION_OFFSET_RANGE = 0.1  # 位置偏移范围（米）
+_COLLECT_SCENE_OBJECTS = [                # 场景中其他物体（用于碰撞检测）
+        "/World/Bowl_0",
+        "/World/CuttingBoard_4",
+        "/World/SaltShaker_3",
+        # ... 添加所有可能碰撞的物体
+    ] # 场景物体列表（用于碰撞检测）
+
+# Episode 状态标志（供 collect_curobo.py 检测）
+_EPISODE_FAILED = False  # 标记当前 episode 是否因规划失败而放弃
+_MAX_PLAN_FAILURES = 10  # 最大规划失败次数阈值
 
 def configure_collection(
     pick_obj: str = None,
@@ -215,6 +365,9 @@ def configure_collection(
     seed_image_path: str = None,
     seed_object_name: str = None,
     render: bool = None,
+    randomize_pick_position: bool = None,
+    position_offset_range: float = None,
+    scene_objects: list = None,
 ):
     """
     配置数据采集模式的参数
@@ -239,6 +392,8 @@ def configure_collection(
     global _COLLECT_APPROACH_HEIGHT, _COLLECT_LIFT_HEIGHT
     global _COLLECT_USE_SEED_MODEL, _COLLECT_SEED_IMAGE_PATH
     global _COLLECT_SEED_OBJECT_NAME, _COLLECT_RENDER
+    global _COLLECT_RANDOMIZE_PICK_POSITION, _COLLECT_POSITION_OFFSET_RANGE
+    global _COLLECT_SCENE_OBJECTS
     
     if pick_obj is not None:
         _COLLECT_PICK_OBJ_PATH = pick_obj
@@ -266,9 +421,15 @@ def configure_collection(
         _COLLECT_SEED_OBJECT_NAME = seed_object_name
     if render is not None:
         _COLLECT_RENDER = render
+    if randomize_pick_position is not None:
+        _COLLECT_RANDOMIZE_PICK_POSITION = randomize_pick_position
+    if position_offset_range is not None:
+        _COLLECT_POSITION_OFFSET_RANGE = position_offset_range
+    if scene_objects is not None:
+        _COLLECT_SCENE_OBJECTS = scene_objects
 
 # 固定放置位置
-fixed_spawn_pos = np.array([0.0, 0.5, -0.25], dtype=float)
+fixed_spawn_pos = np.array([0.0, 0.45, -0.25], dtype=float)
 
 # 🔄 基座旋转配置：是否通过代码旋转基座（而不是修改USD）
 # 设置为 True 时，基座将顺时针旋转90度（从侧面朝向桌子变为正面朝向桌子）
@@ -483,7 +644,7 @@ class CuroboPickPlaceController:
             use_cuda_graph=True,
             interpolation_dt=0.03,  # 30ms 时间步长，降低控制频率，减少抖动
             collision_cache={"obb": 50, "mesh": 30},
-            collision_activation_distance=0.02,  # 增加容忍度
+            collision_activation_distance=0.01,  # 🔑 放宽到 25mm，降低碰撞检测敏感度
             # 添加平滑参数
             smooth_weight=[100.0, 50.0, 10.0],  # 位置、速度、加速度平滑权重
             velocity_scale=0.75,  # 降低速度，增加稳定性
@@ -497,12 +658,12 @@ class CuroboPickPlaceController:
         # 规划配置
         self.plan_config = MotionGenPlanConfig(
             enable_graph=True,
-            max_attempts=30,  # 增加尝试次数
-            enable_graph_attempt=15,  # 增加图搜索尝试
+            max_attempts=50,  # 🔑 增加到 50 次尝试
+            enable_graph_attempt=25,  # 🔑 增加图搜索尝试到 25 次
             enable_finetune_trajopt=True,
             parallel_finetune=True,
             time_dilation_factor=1.0,
-            timeout=10.0,  # 增加超时时间
+            timeout=15.0,  # 🔑 增加超时到 15 秒
         )
         
         # 状态
@@ -792,6 +953,13 @@ class CuroboPickPlaceController:
         else:
             print(f"❌ 规划失败 (Event {self.current_event}), 失败次数: {self.plan_fail_counter + 1}")
             self.plan_fail_counter += 1
+            
+            # 🔑 检查是否超过失败阈值，标记 episode 失败
+            global _EPISODE_FAILED, _MAX_PLAN_FAILURES
+            if self.plan_fail_counter >= _MAX_PLAN_FAILURES:
+                _EPISODE_FAILED = True
+                print(f"⚠️⚠️⚠️ 规划失败次数达到阈值 ({_MAX_PLAN_FAILURES})，放弃当前 episode")
+            
             return False
     
     def _execute_trajectory(self):
@@ -1004,12 +1172,16 @@ def step_once(
     use_seed_model: bool = None,
     seed_image_path: str = None,
     seed_object_name: str = None,
-    grasp_z_rotation: float = 0.0,
+    grasp_z_rotation: float = 45.0,
     grasp_tilt_x: float = 0.0,
-    grasp_tilt_y: float = -30.0,
+    grasp_tilt_y: float = 0.0,
     place_z_rotation: float = 0.0,
     place_tilt_x: float = 0.0,
-    place_tilt_y: float = -30.0,
+    place_tilt_y: float = 0.0,
+    randomize_grasp_pose: bool = True,
+    randomize_pick_position: bool = None,
+    position_offset_range: float = 0.1,
+    scene_objects: list = None,
     render: bool = None
 ) -> bool:
     """
@@ -1031,13 +1203,18 @@ def step_once(
         place_z_rotation: 手动指定的放置 Z 轴旋转角度（度）
         place_tilt_x: 手动指定的放置 X 轴倾斜角度（度）
         place_tilt_y: 手动指定的放置 Y 轴倾斜角度（度）
+        randomize_grasp_pose: 是否对抓取姿态参数进行随机化偏移（-10~+10度）
+        randomize_pick_position: 是否随机化抓取物体位置（仅 X-Y 平面）
+        position_offset_range: 位置偏移范围（米），默认 ±0.1m
+        scene_objects: 场景中其他物体的路径列表（用于碰撞检测）
         render: 是否渲染
         
     返回:
         bool: False 表示无需继续
     """
     global reset_needed, _height_offset_calculated, _cached_pick_height_offset, _cached_placing_height_offset
-    
+    global _EPISODE_FAILED
+
     # 使用配置变量作为默认值（支持数据采集模式）
     if pick_obj_path is None:
         pick_obj_path = _COLLECT_PICK_OBJ_PATH
@@ -1059,6 +1236,12 @@ def step_once(
         seed_object_name = _COLLECT_SEED_OBJECT_NAME
     if render is None:
         render = _COLLECT_RENDER
+    if randomize_pick_position is None:
+        randomize_pick_position = _COLLECT_RANDOMIZE_PICK_POSITION
+    if position_offset_range is None:
+        position_offset_range = _COLLECT_POSITION_OFFSET_RANGE
+    if scene_objects is None:
+        scene_objects = _COLLECT_SCENE_OBJECTS
     
     # 根据路径创建 XFormPrim 对象
     pick_obj = XFormPrim(pick_obj_path)
@@ -1069,6 +1252,11 @@ def step_once(
         eef_lateral_offset = np.array([0.0, 0.0, 0.0])
 
     if not simulation_app.is_running():
+        return False
+    
+    # 🔑 检查 episode 是否已标记为失败
+    if _EPISODE_FAILED:
+        print(f"⚠️ 检测到 episode 失败标志，返回 False 通知采集器停止")
         return False
 
     my_world.step(render=render)
@@ -1087,6 +1275,9 @@ def step_once(
             _cached_pick_height_offset = None
             _cached_placing_height_offset = None
             reset_needed = False
+            
+            # 🔑 重置 episode 失败标志
+            _EPISODE_FAILED = False
 
         # 获取抓取物体与放置物体的世界位姿
         pick_positions, _ = pick_obj.get_world_poses()
@@ -1108,6 +1299,26 @@ def step_once(
         
         # 首次执行时：生成抓取姿态并计算高度偏移
         if my_controller.get_current_event() == 0 and my_controller.cmd_plan is None:
+            
+            print(f"🔍 调试：进入 Event 0 初始化代码块")
+            print(f"🔍 调试：randomize_pick_position = {randomize_pick_position}")
+            
+            # 🎲 随机化抓取物体位置（如果启用）
+            if randomize_pick_position:
+                print(f"\n🎲 开始随机化抓取物体位置...")
+                pick_pos = randomize_object_position(
+                    obj_path=pick_obj_path,
+                    original_pos=pick_pos,
+                    offset_range=position_offset_range,
+                    max_attempts=100,
+                    scene_objects=scene_objects,
+                    safety_margin=0.05
+                )
+                # 更新 pick_positions（用于后续计算）
+                pick_positions = np.array([pick_pos])
+                print()
+            else:
+                print(f"🔍 调试：位置随机化已禁用")
             
             print(f"🎯 抓取物体位置: {pick_pos}")
             print(f"🎯 放置物体位置: {place_pos}")
@@ -1146,24 +1357,43 @@ def step_once(
             if my_controller.use_random_grasp:
                 global _seed_grasp_params_cache
                 
-                # 🎲 添加随机偏移到姿态参数（-10~+10度）
-                random_offset_range = 10.0  # 度
-                grasp_z_rotation_random = grasp_z_rotation + np.random.uniform(-random_offset_range, random_offset_range)
-                grasp_tilt_x_random = grasp_tilt_x + np.random.uniform(-random_offset_range, random_offset_range)
-                grasp_tilt_y_random = grasp_tilt_y + np.random.uniform(-random_offset_range, random_offset_range)
-                
-                place_z_rotation_random = place_z_rotation + np.random.uniform(-random_offset_range, random_offset_range)
-                place_tilt_x_random = place_tilt_x + np.random.uniform(-random_offset_range, random_offset_range)
-                place_tilt_y_random = place_tilt_y + np.random.uniform(-random_offset_range, random_offset_range)
-                
-                print(f"🎲 抓取姿态（基础 + 随机偏移）:")
-                print(f"   Z旋转: {grasp_z_rotation:.1f}° + {grasp_z_rotation_random - grasp_z_rotation:.1f}° = {grasp_z_rotation_random:.1f}°")
-                print(f"   X倾斜: {grasp_tilt_x:.1f}° + {grasp_tilt_x_random - grasp_tilt_x:.1f}° = {grasp_tilt_x_random:.1f}°")
-                print(f"   Y倾斜: {grasp_tilt_y:.1f}° + {grasp_tilt_y_random - grasp_tilt_y:.1f}° = {grasp_tilt_y_random:.1f}°")
-                print(f"🎲 放置姿态（基础 + 随机偏移）:")
-                print(f"   Z旋转: {place_z_rotation:.1f}° + {place_z_rotation_random - place_z_rotation:.1f}° = {place_z_rotation_random:.1f}°")
-                print(f"   X倾斜: {place_tilt_x:.1f}° + {place_tilt_x_random - place_tilt_x:.1f}° = {place_tilt_x_random:.1f}°")
-                print(f"   Y倾斜: {place_tilt_y:.1f}° + {place_tilt_y_random - place_tilt_y:.1f}° = {place_tilt_y_random:.1f}°")
+                # 🎲 根据 randomize_grasp_pose 参数决定是否添加随机偏移
+                if randomize_grasp_pose:
+                    random_offset_range = 10.0  # 度
+                    grasp_z_rotation_random = grasp_z_rotation + np.random.uniform(-random_offset_range, random_offset_range)
+                    grasp_tilt_x_random = grasp_tilt_x + np.random.uniform(-random_offset_range, random_offset_range)
+                    grasp_tilt_y_random = grasp_tilt_y + np.random.uniform(-random_offset_range, random_offset_range)
+                    
+                    place_z_rotation_random = place_z_rotation + np.random.uniform(-random_offset_range, random_offset_range)
+                    place_tilt_x_random = place_tilt_x + np.random.uniform(-random_offset_range, random_offset_range)
+                    place_tilt_y_random = place_tilt_y + np.random.uniform(-random_offset_range, random_offset_range)
+                    
+                    print(f"🎲 抓取姿态（基础 + 随机偏移）:")
+                    print(f"   Z旋转: {grasp_z_rotation:.1f}° + {grasp_z_rotation_random - grasp_z_rotation:.1f}° = {grasp_z_rotation_random:.1f}°")
+                    print(f"   X倾斜: {grasp_tilt_x:.1f}° + {grasp_tilt_x_random - grasp_tilt_x:.1f}° = {grasp_tilt_x_random:.1f}°")
+                    print(f"   Y倾斜: {grasp_tilt_y:.1f}° + {grasp_tilt_y_random - grasp_tilt_y:.1f}° = {grasp_tilt_y_random:.1f}°")
+                    print(f"🎲 放置姿态（基础 + 随机偏移）:")
+                    print(f"   Z旋转: {place_z_rotation:.1f}° + {place_z_rotation_random - place_z_rotation:.1f}° = {place_z_rotation_random:.1f}°")
+                    print(f"   X倾斜: {place_tilt_x:.1f}° + {place_tilt_x_random - place_tilt_x:.1f}° = {place_tilt_x_random:.1f}°")
+                    print(f"   Y倾斜: {place_tilt_y:.1f}° + {place_tilt_y_random - place_tilt_y:.1f}° = {place_tilt_y_random:.1f}°")
+                else:
+                    # 不随机化，直接使用原参数
+                    grasp_z_rotation_random = grasp_z_rotation
+                    grasp_tilt_x_random = grasp_tilt_x
+                    grasp_tilt_y_random = grasp_tilt_y
+                    
+                    place_z_rotation_random = place_z_rotation
+                    place_tilt_x_random = place_tilt_x
+                    place_tilt_y_random = place_tilt_y
+                    
+                    print(f"📝 使用原始抓取姿态参数（无随机偏移）:")
+                    print(f"   Z旋转: {grasp_z_rotation:.1f}°")
+                    print(f"   X倾斜: {grasp_tilt_x:.1f}°")
+                    print(f"   Y倾斜: {grasp_tilt_y:.1f}°")
+                    print(f"📝 使用原始放置姿态参数（无随机偏移）:")
+                    print(f"   Z旋转: {place_z_rotation:.1f}°")
+                    print(f"   X倾斜: {place_tilt_x:.1f}°")
+                    print(f"   Y倾斜: {place_tilt_y:.1f}°")
                 
                 # 决定使用 Seed 模型还是手动参数
                 if use_seed_model:
@@ -1192,10 +1422,10 @@ def step_once(
                         except Exception as e:
                             print(f"❌ Seed 模型调用失败: {e}")
                             print("⚠️ 回退到手动指定参数")
-                            z_rot, tilt_x, tilt_y = grasp_z_rotation, grasp_tilt_x, grasp_tilt_y
+                            z_rot, tilt_x, tilt_y = grasp_z_rotation_random, grasp_tilt_x_random, grasp_tilt_y_random
                             print("="*70 + "\n")
                 else:
-                    print("\n📝 使用手动指定的抓取姿态参数（带随机偏移）")
+                    print("\n📝 使用手动指定的抓取姿态参数" + ("（带随机偏移）" if randomize_grasp_pose else "（无随机偏移）"))
                     z_rot, tilt_x, tilt_y = grasp_z_rotation_random, grasp_tilt_x_random, grasp_tilt_y_random
                 
                 # 生成抓取姿态四元数
@@ -1212,7 +1442,7 @@ def step_once(
                 
                 # 🎯 生成放置姿态四元数（使用带随机偏移的参数）
                 my_controller.current_place_quat = generate_grasp_pose(
-                    z_rotation=z_rot,
+                    z_rotation=place_z_rotation_random,
                     tilt_x=tilt_x,
                     tilt_y=tilt_y
                 )
@@ -1408,13 +1638,11 @@ def step_once(
 if __name__ == "__main__":
     try:
         while step_once(
-            render=True,
-            pick_obj_path="/World/SaltShaker_3",
-            place_obj_path="/World/Bowl_0"
+            render=True
             ):
             pass
     finally:
         simulation_app.close()
 
 # 运行命令
-# /home/di-gua/isaac-sim/python.sh scipy/pick_place_cusci_7states.py
+# /home/di-gua/isaac-sim/python.sh scipy/pick_place_cu_ramsci.py

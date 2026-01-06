@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,33 @@ from types import ModuleType
 from typing import Callable, Dict, Optional, Tuple
 
 import numpy as np
+
+
+def _get_step_module(module: ModuleType, step_fn: Callable[..., object]) -> ModuleType:
+    """Return the Python module object where step_fn is defined.
+
+    Important: the loaded `script` module may import/re-export step_once from
+    another module; the episode failure flag lives in the module that actually
+    defines step_once.
+    """
+    try:
+        mod_name = getattr(step_fn, "__module__", None)
+        if mod_name and mod_name in sys.modules:
+            return sys.modules[mod_name]
+    except Exception:
+        pass
+    return module
+
+
+def _get_episode_failed(module: ModuleType, step_fn: Callable[..., object]) -> bool:
+    step_mod = _get_step_module(module, step_fn)
+    return bool(getattr(step_mod, "_EPISODE_FAILED", False))
+
+
+def _reset_episode_failed(module: ModuleType, step_fn: Callable[..., object]) -> None:
+    step_mod = _get_step_module(module, step_fn)
+    if hasattr(step_mod, "_EPISODE_FAILED"):
+        step_mod._EPISODE_FAILED = False
 
 
 CAPTURE_RESOLUTION = (1280, 960)
@@ -944,6 +972,25 @@ def collect_from_module(
             
             physics_dt = _safe_get_physics_dt(my_world)
             
+            # 🔑 检查 episode 是否因规划失败而放弃（必须从 step_once 所在模块读取）
+            episode_failed = _get_episode_failed(module, step_fn)
+            if episode_failed and capturing_active:
+                print(f"\n❌❌❌ 检测到规划失败，放弃当前 episode，重新采集...")
+                # 不增加 completed_episodes 计数，直接触发停止和重新开始
+                should_stop = True
+                # 注意：不在这里重置 _EPISODE_FAILED，在后面的处理分支中重置
+            elif episode_failed and (not capturing_active):
+                # 失败标志在未开始采集时出现：直接清掉，避免污染下一次 episode
+                print("⚠️ 检测到失败标志但尚未开始采集，直接清除并重置控制器...")
+                _reset_episode_failed(module, step_fn)
+                if controller is not None and hasattr(controller, "reset"):
+                    controller.reset()
+                if hasattr(_get_step_module(module, step_fn), "reset_needed"):
+                    _get_step_module(module, step_fn).reset_needed = True
+                should_stop = False
+            else:
+                should_stop = False
+            
             # 检测是否正在进行 CuRobo 规划（规划期间不采集）
             is_planning = False
             if controller is not None and hasattr(controller, "is_planning"):
@@ -956,11 +1003,10 @@ def collect_from_module(
             collector.advance_time(physics_dt, is_planning=is_planning)
 
             should_start = False
-            should_stop = False
-
-            # 🔑 step_once 返回 False 表示任务完成
-            if step_result is False and capturing_active:
-                should_stop = True
+            if not should_stop:  # 只有在非失败情况下才检查 should_stop
+                # 🔑 step_once 返回 False 表示任务完成
+                if step_result is False and capturing_active:
+                    should_stop = True
             
             if callable(start_hook) or callable(stop_hook):
                 if callable(start_hook) and not capturing_active:
@@ -982,6 +1028,72 @@ def collect_from_module(
                 collector.end_episode()
                 capturing_active = False
                 collector.reset_capture_timer()
+
+                # 🔑 重新读取失败标志（从 step_once 所在模块读取，避免读错 module）
+                episode_failed = _get_episode_failed(module, step_fn)
+                
+                # 🔑 检查是否因规划失败放弃（不增加计数，直接重试）
+                if episode_failed:
+                    print(f"\n⚠️ Episode 放弃，不计入完成数，准备重新采集...")
+                    print(f"   当前进度仍为: {completed_episodes}/{num_episodes}")
+
+                    # 记录失败的 episode id/目录（用于覆盖重录）
+                    failed_episode_id = int(getattr(collector, "episode_index", 0))
+                    failed_episode_dir = getattr(getattr(collector, "writer", None), "episode_dir", None)
+                    if failed_episode_dir is None and getattr(collector, "session_dir", None) is not None:
+                        try:
+                            failed_episode_dir = Path(collector.session_dir) / f"episode_{failed_episode_id:04d}"
+                        except Exception:
+                            failed_episode_dir = None
+                    
+                    # 🔑 等待写盘完成（避免文件冲突）
+                    max_wait = 30
+                    wait_start = time.time()
+                    while not collector.writer.is_ready() and (time.time() - wait_start) < max_wait:
+                        time.sleep(0.1)
+
+                    # 覆盖重录：删除刚刚写出的失败 episode 目录，并回退 episode_index
+                    if failed_episode_id > 0:
+                        try:
+                            if failed_episode_dir is not None and Path(failed_episode_dir).exists():
+                                shutil.rmtree(str(failed_episode_dir), ignore_errors=True)
+                                print(f"🧹 已删除失败 episode 目录以便覆盖重录: {failed_episode_dir}")
+                        except Exception as e:
+                            print(f"⚠️ 删除失败 episode 目录失败: {e}")
+                        try:
+                            # start_episode() 会先 +1；这里先 -1 让下一次仍使用同一编号
+                            collector.episode_index = max(0, int(collector.episode_index) - 1)
+                        except Exception:
+                            pass
+                    
+                    # 重置控制器和任务
+                    print(f"🔄 重置控制器，准备重新采集 episode {completed_episodes + 1}/{num_episodes}...")
+                    
+                    if controller is not None and hasattr(controller, "reset"):
+                        controller.reset()
+                    
+                    if my_world is not None and hasattr(my_world, "reset"):
+                        try:
+                            my_world.reset()
+                        except Exception as e:
+                            print(f"⚠️ 世界重置失败: {e}")
+                    
+                    # 清除缓存
+                    step_mod = _get_step_module(module, step_fn)
+                    if hasattr(step_mod, "_seed_grasp_params_cache"):
+                        step_mod._seed_grasp_params_cache = None
+                    if hasattr(step_mod, "_height_offset_calculated"):
+                        step_mod._height_offset_calculated = False
+                    if hasattr(step_mod, "reset_needed"):
+                        step_mod.reset_needed = True
+
+                    # 🔑 重置失败标志（关键！写回 step_once 所在模块）
+                    _reset_episode_failed(module, step_fn)
+                    print("   已重置 episode 失败标志")
+                    
+                    continue  # 重新开始循环，不增加 completed_episodes
+                
+                # 正常完成的 episode
                 completed_episodes += 1
                 
                 print(f"\n✅ Episode {completed_episodes}/{num_episodes} 完成，等待写盘...")
@@ -1019,10 +1131,15 @@ def collect_from_module(
                         print(f"⚠️ 世界重置失败: {e}")
                 
                 # 清除随机姿态缓存，让下一个 episode 生成新姿态
-                if hasattr(module, "_seed_grasp_params_cache"):
-                    module._seed_grasp_params_cache = None
-                if hasattr(module, "_height_offset_calculated"):
-                    module._height_offset_calculated = False
+                step_mod = _get_step_module(module, step_fn)
+                if hasattr(step_mod, "_seed_grasp_params_cache"):
+                    step_mod._seed_grasp_params_cache = None
+                if hasattr(step_mod, "_height_offset_calculated"):
+                    step_mod._height_offset_calculated = False
+
+                # 🔑 重置失败标志（关键！写回 step_once 所在模块）
+                _reset_episode_failed(module, step_fn)
+                print("   已重置 episode 失败标志")
                 
                 continue
 

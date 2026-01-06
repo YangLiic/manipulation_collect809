@@ -30,7 +30,7 @@ from pick_place_cu_ramsci import *
 
 # 示例 1: 抓取盐罐放到砧板上
 configure_collection(
-    pick_obj="/World/SaltShaker_3",
+    pick_obj="/World/Vegetable_9",
     place_obj="/World/Bowl_0",
     auto_height_offset=True,
     use_seed_model=False,  # 不使用 Seed 模型，使用手动姿态
